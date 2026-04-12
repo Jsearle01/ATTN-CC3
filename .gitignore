@@ -1,0 +1,25 @@
+# Build artifacts
+build/
+*.bin
+!test/vectors.bin
+
+# MAME runtime output
+*.log
+mame_out.log
+
+# Editor detritus
+*.swp
+*.swo
+.DS_Store
+*~
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Temporary probe files
+probe_*.asm
+probe_*.bin
+
+# Generated artifact (regenerate on demand)
+test/vectors.txt
