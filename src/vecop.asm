@@ -130,3 +130,40 @@ VADD_LOOP:
                 BNE     VADD_LOOP
                 LEAS    1,S             ; drop count byte
                 RTS
+
+* ============================================================
+* VMAX — Find maximum element and its index
+* ============================================================
+* Matches ATTN/11 VMAX: linear scan, returns first occurrence
+* of the maximum value.
+*
+* Entry:  X -> vector (2 bytes per element, Q8 signed)
+*         B = element count (1..128)
+* Exit:   D = max value (Q8)
+*         X = index of max (0-based)
+* Clobbers: X, Y, D, CC
+* ============================================================
+VMAX:
+* Save count, init max = vec[0], best_index = 0, cur_index = 1
+                PSHS    B               ; save count on stack
+                LDD     ,X++            ; D = vec[0], advance X
+                STD     VDOT_TMP        ; VDOT_TMP = current max value
+                LDY     #0              ; Y = best index = 0
+                DEC     ,S              ; one element consumed
+                BEQ     VMAX_DONE       ; if count was 1, done
+                LDU     #1              ; U = current scanning index
+VMAX_LOOP:
+                LDD     ,X++            ; D = vec[i]
+                CMPD    VDOT_TMP        ; compare with current max
+                BLE     VMAX_SKIP       ; not greater, skip
+                STD     VDOT_TMP        ; new max
+                TFR     U,Y             ; best index = current index
+VMAX_SKIP:
+                LEAU    1,U             ; current index++
+                DEC     ,S              ; decrement remaining count
+                BNE     VMAX_LOOP
+VMAX_DONE:
+                LDD     VDOT_TMP        ; D = max value
+                TFR     Y,X             ; X = best index
+                LEAS    1,S             ; drop count byte
+                RTS
