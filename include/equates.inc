@@ -85,6 +85,9 @@ BW_END          EQU     BW_SCRATCH+64
 * -------- Fixed scratch locations inside BW_SCRATCH --------
 MULSCR          EQU     BW_SCRATCH              ; 4B STQ target for normalize-by-offset
 SOFTMAX_TMP     EQU     BW_SCRATCH+4            ; 32B softmax row buffer
+VDOT_ACC        EQU     BW_SCRATCH+40           ; 4B 32-bit dot product accumulator
+VDOT_TMP        EQU     BW_SCRATCH+44           ; 2B temp for carry propagation
+VSCL_ALPHA      EQU     BW_SCRATCH+46           ; 2B saved scalar for VSCL loop
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)

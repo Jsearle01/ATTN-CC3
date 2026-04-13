@@ -200,3 +200,57 @@ forward:
         if not mach then return end
         -- ...
     end)
+
+## Harness code must live above the text screen buffer
+
+**Discovery**: The VECOP harness grew large enough (~800 bytes
+of code) that with ORG $0200, code bytes landed at addresses
+$0400-$051C, inside the CoCo3 text screen buffer ($0400-$05FF).
+This caused: (a) screen displayed code bytes as garbage, and
+(b) CLEAR_SCREEN's TFM fill potentially corrupted the code.
+VDOT happened to pass anyway but VSCL and VADD failed mysteriously.
+
+**Policy**: All test harnesses use `ORG $0600` rather than
+`ORG $0200`. This places code safely above the screen buffer
+with the $0200-$03FF region available as scratch if needed.
+The 512 bytes of header padding in the raw binary are trivial
+cost.
+
+For the eventual production main.asm, code at $0200 is fine
+because the Stage 1 memory map allocates $0200-$03FF for code
+that runs BEFORE CLEAR_SCREEN is called (interrupt vectors,
+reset handler, early init). Code that runs after CLEAR_SCREEN
+and is larger than ~500 bytes must be placed at $0600+ via
+explicit ORG.
+
+Update t_fxmath.asm to ORG $0600 at next opportunity (not urgent
+-- it fits below $0400 currently, but consistency is valuable).
+
+## Do not use B as a loop counter across LDD-family instructions
+
+**Discovery**: The VECOP harness had three distinct instances of
+the same bug: using `B` as a loop counter in a loop that contains
+`LDD ,X++` or similar. LDD loads the 16-bit operand into D (= A:B),
+overwriting B with the low byte of the loaded data. After LDD, B
+no longer holds the counter — it holds data. DECB then decrements
+the data value, and the loop either spins forever or terminates
+on a data-dependent coincidence (when some element's low byte
+happens to equal 1).
+
+Observed manifestations:
+  - VADD's inner loop spun forever (PC stuck at $091E)
+  - VSCL_CMP and VADD_CMP in the harness silently misbehaved
+    (hidden by the comparison branching out before DECB ran)
+
+**Policy**: Loop counters that must survive across LDD, ADDD,
+SUBD, MULD, or any D-writing instruction must live on the stack
+(`PSHS B` / `DEC ,S` / `LEAS 1,S`) or in X/Y/U when those are
+free. The only safe B-as-counter loops are those that use no
+D-writing instructions inside the loop body.
+
+This is not a 6309 peculiarity — it applies to 6809 as well.
+Mentioned here because it is a subtle trap for anyone porting
+from architectures (PDP-11, x86, 68k) where the counter register
+is conventionally distinct from the data path.
+
+Apply to: all future loop code in MATOP, ACTFN, LAYER, TRAIN.
