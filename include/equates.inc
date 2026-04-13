@@ -78,9 +78,9 @@ BW_DQ           EQU     BW_DATT+SEQ*SEQ*Q15SZ
 BW_DK           EQU     BW_DQ+DSEQ*Q15SZ
 BW_DV           EQU     BW_DK+DSEQ*Q15SZ
 BW_DX           EQU     BW_DV+DSEQ*Q15SZ      ; SEQ*D*2 = 256
-BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 64B total scratch
-BW_END          EQU     BW_SCRATCH+64
-*               Total: 1632 B used of 2048 B budget, 416 B headroom
+BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 80B total scratch
+BW_END          EQU     BW_SCRATCH+80
+*               Total: 1648 B used of 2048 B budget, 400 B headroom
 
 * -------- Fixed scratch locations inside BW_SCRATCH --------
 MULSCR          EQU     BW_SCRATCH              ; 4B STQ target for normalize-by-offset
@@ -97,6 +97,13 @@ MP_COL          EQU     BW_SCRATCH+56           ; 2B column count
 MP_AHI          EQU     BW_SCRATCH+58           ; 2B accumulator high (internal)
 MP_ALO          EQU     BW_SCRATCH+60           ; 2B accumulator low (internal)
 MP_SCL          EQU     BW_SCRATCH+62           ; 2B scalar temp (internal)
+* -------- SFTMX parameter block (caller fills SF_VEC, SF_LEN, SF_OUT) --------
+SF_VEC          EQU     BW_SCRATCH+64           ; 2B softmax input vector pointer
+SF_LEN          EQU     BW_SCRATCH+66           ; 2B softmax length
+SF_MAX          EQU     BW_SCRATCH+68           ; 2B softmax max value (internal)
+SF_SUM          EQU     BW_SCRATCH+70           ; 2B softmax exp sum (16-bit; max count=10)
+SF_OUT          EQU     BW_SCRATCH+72           ; 2B softmax output pointer
+*               BW_SCRATCH+74..+79: 6B reserved for future ACTFN expansion only
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)

@@ -62,3 +62,95 @@ FX_SHIFT_XENT:
                 LSLD
                 LSLD
                 RTS
+
+* ------------------------------------------------------------
+* FXDIV — Q8 division: D = D / (Y)
+* ------------------------------------------------------------
+* Matches ATTN/11 FXDIV: (a << 8) / b, truncating toward zero.
+* Uses 6309 DIVQ instruction.
+*
+* Entry:  D = dividend (Q8, 16-bit signed)
+*         Y -> divisor in memory (Q8, 16-bit signed)
+* Exit:   D = quotient (Q8, truncated toward zero)
+*         CC: C set on divide-by-zero
+* Clobbers: D, W, Q, CC
+* Uses: MULSCR (4B) for building 32-bit dividend
+*
+* Divide-by-zero: returns $7FFF if a > 0, $8000 if a < 0,
+* $0000 if a == 0. Sets carry flag.
+*
+* DIVQ: Q (32-bit D:W) / memory (16-bit) -> W = quotient, D = remainder
+* DIVQ truncates toward zero (matching PDP-11 DIV behavior).
+* ------------------------------------------------------------
+FXDIV:
+* Check for divide-by-zero
+                LDW     ,Y              ; W = divisor (for later check)
+                CMPW    #0
+                BNE     FXD_OK
+* Divide by zero — saturate based on sign of dividend
+                TSTA                    ; test high byte of D (dividend)
+                BEQ     FXD_DZTEST_B
+                BPL     FXD_DZ_POS
+                BRA     FXD_DZ_NEG
+FXD_DZTEST_B:
+                TSTB                    ; A=0, check B
+                BEQ     FXD_DZ_ZERO
+FXD_DZ_POS:
+                LDD     #$7FFF          ; +saturate
+                ORCC    #$01            ; set carry
+                RTS
+FXD_DZ_NEG:
+                LDD     #$8000          ; -saturate
+                ORCC    #$01            ; set carry
+                RTS
+FXD_DZ_ZERO:
+                CLRA                    ; 0/0 = 0
+                CLRB
+                ORCC    #$01            ; set carry
+                RTS
+
+FXD_OK:
+* Build 32-bit dividend = a << 8.
+* Place a's bytes at positions [1] and [2] of 4-byte MULSCR:
+*   MULSCR+0 = sign extension ($00 or $FF)
+*   MULSCR+1 = D high byte (A)
+*   MULSCR+2 = D low byte (B)
+*   MULSCR+3 = $00
+                STA     MULSCR+1        ; a high byte
+                STB     MULSCR+2        ; a low byte
+                CLR     MULSCR+3        ; low byte = 0
+                TSTA
+                BPL     FXD_SPOS
+                LDA     #$FF
+                STA     MULSCR          ; negative sign extension
+                BRA     FXD_DO
+FXD_SPOS:
+                CLR     MULSCR          ; positive sign extension
+FXD_DO:
+* Load Q from MULSCR (32-bit dividend = a << 8)
+                LDQ     MULSCR
+* DIVQ: Q / (Y) -> W = quotient, D = remainder
+* DIVQ sets V if quotient overflows 16-bit signed range.
+                DIVQ    ,Y
+                BVS     FXD_OVERFLOW
+* Move quotient from W to D
+                TFR     W,D
+                ANDCC   #$FE            ; clear carry (success)
+                RTS
+
+* Overflow: quotient exceeds 16-bit signed range.
+* Determine sign of result from signs of dividend and divisor.
+* MULSCR+0 = sign of dividend ($00 pos, $FF neg).
+* (Y) = divisor (test sign).
+FXD_OVERFLOW:
+                LDA     MULSCR          ; sign of dividend
+                EORA    ,Y              ; XOR with high byte of divisor
+* If result of XOR has bit 7 set, signs differ -> negative result
+                BMI     FXD_OV_NEG
+                LDD     #$7FFF          ; positive saturate
+                ANDCC   #$FE
+                RTS
+FXD_OV_NEG:
+                LDD     #$8000          ; negative saturate
+                ANDCC   #$FE
+                RTS
