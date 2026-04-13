@@ -1,0 +1,26 @@
+# MATOP test vectors (single-clamp semantics)
+
+MVMUL test 0: 1x1 -> [896]
+MVMUL test 1: 3x3 -> [384, -512, 64]
+MVMUL test 2: 2x3 -> [640, -320]
+MVMUL test 3: 1x2 -> [32767]
+MVMUL test 4: 2x2 -> [32767, 32767]
+
+MVADD test 0: 2x2 sc=[768, -512] ts=[768, -512] [SAME]
+MVADD test 1: 2x2 sc=[768, -256] ts=[768, -256] [SAME]
+MVADD test 2: 2x3 sc=[896, -576] ts=[896, -576] [SAME]
+MVADD test 3: 1x1 sc=[32512] ts=[32512] [SAME]
+MVADD test 4: 1x1 sc=[12800] ts=[-32768] [DIVERGE]
+MVADD test 5: 2x2 sc=[32767, 32767] ts=[32767, 32767] [SAME]
+
+VTMUL test 0: 1x1 -> [896]
+VTMUL test 1: 2x2 -> [0, 0]
+VTMUL test 2: 2x3 -> [320, 256, -64]
+VTMUL test 3: 2x2 -> [384, 0]
+VTMUL test 4: 2x2 -> [32767, 32767]
+
+OUTER test 0: 2x2 -> [256, 512, 768, 1024]
+OUTER test 1: 2x3 -> [128, -128, 256, 256, -256, 512]
+OUTER test 2: 2x2 -> [512, -128, -128, -256]
+OUTER test 3: 1x2 -> [32767, 32767]
+OUTER test 4: 2x2 -> [-1280, 1280, 1280, -1280]

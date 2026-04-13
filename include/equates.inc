@@ -88,6 +88,15 @@ SOFTMAX_TMP     EQU     BW_SCRATCH+4            ; 32B softmax row buffer
 VDOT_ACC        EQU     BW_SCRATCH+40           ; 4B 32-bit dot product accumulator
 VDOT_TMP        EQU     BW_SCRATCH+44           ; 2B temp for carry propagation
 VSCL_ALPHA      EQU     BW_SCRATCH+46           ; 2B saved scalar for VSCL loop
+* -------- MATOP parameter block (caller fills before JSR) --------
+MP_MAT          EQU     BW_SCRATCH+48           ; 2B matrix base pointer
+MP_VIN          EQU     BW_SCRATCH+50           ; 2B input vector / vx pointer
+MP_OUT          EQU     BW_SCRATCH+52           ; 2B output vector / vy pointer
+MP_ROW          EQU     BW_SCRATCH+54           ; 2B row count
+MP_COL          EQU     BW_SCRATCH+56           ; 2B column count
+MP_AHI          EQU     BW_SCRATCH+58           ; 2B accumulator high (internal)
+MP_ALO          EQU     BW_SCRATCH+60           ; 2B accumulator low (internal)
+MP_SCL          EQU     BW_SCRATCH+62           ; 2B scalar temp (internal)
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)

@@ -254,3 +254,37 @@ from architectures (PDP-11, x86, 68k) where the counter register
 is conventionally distinct from the data path.
 
 Apply to: all future loop code in MATOP, ACTFN, LAYER, TRAIN.
+
+## MATOP single-clamp deviation from ATTN/11
+
+**Spec says**: ATTN/11's MVADD, VTMUL, and OUTER use a two-stage
+clamp: (1) normalize the Q16 product to Q8 via ASHC #-8 with
+clamp to +/-32767, then (2) ADD the clamped result to the
+destination with a second signed-overflow clamp (BVC/BPL/BMI).
+
+**Reality**: The two-stage approach loses information. When the
+intermediate product exceeds +/-32767 after >>8, the first clamp
+saturates it. Then the second addition against a destination of
+opposite sign produces a result that's less accurate than if the
+full 32-bit product had been summed with the sign-extended
+destination before a single clamp.
+
+**Deviation**: Our MVADD, VTMUL, and OUTER use single-clamp
+32-bit accumulate:
+  1. Compute the full 32-bit Q16 product (MULD).
+  2. Sign-extend the existing destination Q8 value to 32-bit Q16.
+  3. Add (2) to the 32-bit product from (1).
+  4. Apply a single NORMQ15 + clamp to extract Q8.
+
+This is bit-identical to ATTN/11 in the common case (product fits
+in Q8 range after >>8). In the saturation case, it preserves
+sign+magnitude through to the final sum. MVMUL is unaffected
+(single clamp either way).
+
+Verified empirically with a divergence test case:
+  mat=[100.0], vin=[1.5], vout_init=[-100.0]
+  Single-clamp result: 12800 ($3200 = 50.0 in Q8) — correct
+  Two-stage result: -32768 ($8000) — saturated by intermediate clamp
+
+This test is included in the MVADD test suite (test case 4) and
+will fail loudly if the code is ever regressed to two-stage clamp.
