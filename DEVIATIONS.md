@@ -288,3 +288,60 @@ Verified empirically with a divergence test case:
 
 This test is included in the MVADD test suite (test case 4) and
 will fail loudly if the code is ever regressed to two-stage clamp.
+
+## VSADD two-stage clamp (differs from MATOP single-clamp by design)
+
+VSADD computes per-element `dst[k] += clamp16((scalar * src[k]) >> 8)`.
+It uses a two-stage clamp:
+  Stage 1: clamp (scalar * src[k]) >> 8 to Q8 range.
+  Stage 2: clamp dst[k] + stage1 to Q8 range.
+
+This deliberately differs from MATOP's MVADD/VTMUL/OUTER single-clamp
+strategy. The reason is semantic:
+
+- MATOP accumulating routines operate inside a mathematical sum (dot
+  product, outer product). The true sum is what matters; single-clamp
+  preserves full precision through to a final normalize.
+
+- VSADD is per-element scale-add used in gradient updates (BKWRD step 2
+  dV accumulation). Each element's saturation should be committed
+  independently, matching ATTN/11's ASHC #-8 + ADD with BVC overflow
+  clamp. Single-clamp would alter gradient magnitudes in saturating
+  cases and affect learning dynamics in hard-to-predict ways.
+
+Test coverage: VSADD test 4 (PRODUCT_SAT) exercises a case where the
+two paths diverge (two-stage = 12767, single-clamp = 32767). The
+divergence is annotated in tables/vsadd_vectors.asm so any future
+regression to single-clamp fails the test loudly.
+
+## Loop counter register rule (generalized)
+
+Do not use any register as a loop counter across an instruction that
+writes it. Specifically:
+- B is clobbered by LDD, LDW, MUL, MULD, and any op writing D.
+- W is clobbered by MULD, TFM, STQ, and any 32-bit arithmetic writing Q.
+- A is clobbered by LDA, LDD, and any op writing D.
+
+Use a stack counter:
+- For loops of <= 255 iterations: `PSHS A` (or B) at entry,
+  `DEC ,S / BNE loop / LEAS 1,S` at loop tail.
+- For loops of > 255 iterations: `PSHS D` at entry,
+  `LDD ,S / SUBD #1 / STD ,S / BNE loop / LEAS 2,S` at loop tail.
+
+Or a DP scratch slot if the routine needs the stack depth for other
+purposes (rare; MATOP's MP_* pattern demonstrates this).
+
+Examples of correct usage:
+- VDOT, VSCL: stack byte counter (8-bit loop length).
+- MATOP MVMUL, MVADD, VTMUL, OUTER: DP scratch counters via MP_AHI,
+  MP_ALO, MP_SCL — avoids register clobbering across MULD+accumulate.
+- VSADD: stack byte counter (fixed after W-register regression).
+
+The bugs that prompted this generalization: VSADD initially used W as
+loop counter via DECW/BNE; MULD VS_SCL clobbers W via Q = D:W, hanging
+MAME at PC=$0C6B. In the same commit, harness RECORD_PASS used LDA
+CUR_TEST_ID / LDD #1 for bitmask setup; LDD clobbered A, causing the
+shift loop to exit immediately and producing RESULT_BITS=$0001
+regardless of actual test pass status. Both bugs have the same root
+cause: register used as counter got written by an intervening
+instruction. The stack-counter convention avoids both.

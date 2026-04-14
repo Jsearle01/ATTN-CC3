@@ -231,3 +231,103 @@ VCLR_LOOP:
                 BNE     VCLR_LOOP
 VCLR_DONE:
                 RTS
+
+* ============================================================
+* VSADD — Vector scale-add with two-stage clamp
+* ============================================================
+* dst[k] = clamp16( dst[k] + clamp16( (scalar * src[k]) >> 8 ) )
+* for k in 0..V_LEN-1
+*
+* Caller sets: VS_SRC, VS_DST, VS_SCL, VS_LEN
+*   VS_LEN is word count (not byte count).
+*   VS_SCL is a Q8 word, can be any signed 16-bit value.
+*
+* Exit: VS_LEN words at VS_DST updated (scale-add-clamped).
+* Clobbers: X, Y, D, W, Q, CC
+*
+* DEVIATION from MATOP's single-clamp pattern: two-stage is correct
+* for per-element scale-add (gradient update semantics). Matches
+* ATTN/11's ASHC #-8 followed by ADD with BVC overflow clamp.
+* See DEVIATIONS.md for why this differs from MVADD/VTMUL/OUTER:
+* VSADD's per-element independence means each element's saturation
+* should be committed before summing. MATOP's accumulating routines
+* preserve full precision through to a final normalize.
+*
+* Q16 -> Q8 via bit-[23:8] extraction. Equals arithmetic >>8 for
+* signed 32-bit MULD products. Matches ATTN/11's ASHC #-8 semantics.
+*
+* Two-stage clamp pattern:
+*   Stage 1: clamp (scalar * src[k]) >> 8 to Q8 range via MSB byte test
+*   Stage 2: clamp dst[k] + stage1 via ADDD/BVS, direction from stage1 sign
+*
+* MULSCR REUSE: The 4-byte STQ target at MULSCR is reused here for the
+* 32-bit product. Safe because VSADD is never called from inside a
+* MATOP routine (both exist at the same composition level).
+*
+* Scaled product preservation: PSHS D across the ADDD. Stack pattern
+* chosen over U-holding to keep "BVS must follow ADDD" invariant
+* visually obvious (no register manipulation between the two).
+*
+* V_LEN limit: must be <= 255. Current architecture uses D=16 maximum,
+* so this limit is never approached. If a future variant grows vector
+* dimension past 255, widen the counter to stack-word via PSHS D and
+* use SUBD #1 / STD ,S at loop tail. See DEVIATIONS.md counter rule.
+*
+* Counter: MULD writes Q=D:W, so W cannot be a loop counter here.
+* Use stack byte counter (matches VDOT/VSCL convention).
+* ============================================================
+VSADD:
+                LDW     VS_LEN
+                BEQ     VSADD_DONE      ; zero-length no-op
+                LDY     VS_SRC
+                LDX     VS_DST
+                LDA     VS_LEN+1        ; low byte of V_LEN as counter
+                PSHS    A               ; counter on stack (MULD clobbers W)
+VSADD_LOOP:
+* --- Stage 1: compute scaled product, clamp to Q8 ---
+                LDD     ,Y++            ; D = src[k], advance src
+                MULD    VS_SCL          ; Q = D * VS_SCL (signed 32-bit product)
+                STQ     MULSCR          ; save full 32-bit product
+* Check if result fits in Q8 (bits [23:8] must be in 16-bit signed range).
+* MSB byte = bits [31:24]. $00 = positive fits, $FF = negative fits.
+                LDA     MULSCR          ; MSB of 32-bit product
+                BEQ     VSADD_S1_OK
+                CMPA    #$FF
+                BEQ     VSADD_S1_OK
+* Overflow in stage 1 — saturate based on sign of full product.
+                TSTA
+                BPL     VSADD_S1_POS
+                LDD     #$8000          ; negative saturate
+                BRA     VSADD_S2
+VSADD_S1_POS:
+                LDD     #$7FFF          ; positive saturate
+                BRA     VSADD_S2
+VSADD_S1_OK:
+                LDD     MULSCR+1        ; bits [23:8] = Q8 scaled product
+VSADD_S2:
+* D now holds the Q8 scaled product (stage 1 result).
+* --- Stage 2: add to dst[k], clamp on overflow ---
+* BVS must immediately follow ADDD. PSHS D preserves the scaled
+* product for sign-testing on overflow; no V-affecting ops between.
+                PSHS    D               ; preserve scaled product
+                ADDD    ,X              ; D = scaled + dst[k], V set on overflow
+                BVS     VSADD_OVFL
+                STD     ,X++            ; no overflow: store sum, advance dst
+                LEAS    2,S             ; drop preserved scaled (discard)
+                BRA     VSADD_NEXT
+VSADD_OVFL:
+                PULS    D               ; recover scaled product for sign test
+                TSTA                    ; test sign of scaled product
+                BMI     VSADD_NEG_SAT
+                LDD     #$7FFF          ; positive overflow (both addends positive)
+                BRA     VSADD_OVFL_STORE
+VSADD_NEG_SAT:
+                LDD     #$8000          ; negative overflow
+VSADD_OVFL_STORE:
+                STD     ,X++            ; store saturated value, advance dst
+VSADD_NEXT:
+                DEC     ,S              ; decrement stack counter
+                BNE     VSADD_LOOP      ; short branch fits (~85 bytes)
+                LEAS    1,S             ; drop counter
+VSADD_DONE:
+                RTS

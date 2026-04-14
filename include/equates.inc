@@ -78,9 +78,10 @@ BW_DQ           EQU     BW_DATT+SEQ*SEQ*Q15SZ
 BW_DK           EQU     BW_DQ+DSEQ*Q15SZ
 BW_DV           EQU     BW_DK+DSEQ*Q15SZ
 BW_DX           EQU     BW_DV+DSEQ*Q15SZ      ; SEQ*D*2 = 256
-BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 80B total scratch
-BW_END          EQU     BW_SCRATCH+80
-*               Total: 1648 B used of 2048 B budget, 400 B headroom
+BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 84B total scratch (was 80)
+BW_END          EQU     BW_SCRATCH+84         ; was +80
+*               Total: 1652 B used of 2048 B budget, 396 B headroom
+*               STACK_TOP gap: 908 bytes (was 912, negligible reduction)
 
 * -------- Fixed scratch locations inside BW_SCRATCH --------
 MULSCR          EQU     BW_SCRATCH              ; 4B STQ target for normalize-by-offset
@@ -107,7 +108,20 @@ SF_OUT          EQU     BW_SCRATCH+72           ; 2B softmax output pointer
 V_SRC           EQU     BW_SCRATCH+74           ; 2B source pointer (VCPY)
 V_DST           EQU     BW_SCRATCH+76           ; 2B destination pointer
 V_LEN           EQU     BW_SCRATCH+78           ; 2B word count (not byte count)
-*               BW_SCRATCH is now fully allocated (80 bytes, ends at BW_END)
+
+* -------- VSADD parameter block --------
+* INVARIANT: V_* and VS_* share physical storage. VSADD must not be
+* called while VCPY/VCLR parameters are in preparation. Currently safe
+* because VCPY/VCLR are leaf utilities and VSADD is only called from
+* BKWRD step 2 (deferred to TRAIN phase) where V_* are dead. If a
+* future composite routine ever calls VSADD between setting V_* and
+* calling VCPY/VCLR, this overlay silently breaks. See call-graph
+* analysis in the Step 2 commit message.
+VS_SRC          EQU     V_SRC                   ; alias: source vector ptr
+VS_DST          EQU     V_DST                   ; alias: dest vector ptr
+VS_LEN          EQU     V_LEN                   ; alias: word count
+VS_SCL          EQU     BW_SCRATCH+80           ; 2B Q8 scalar (dedicated)
+*               BW_SCRATCH+82 through +83 reserved for future use
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)
