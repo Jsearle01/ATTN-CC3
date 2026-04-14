@@ -167,3 +167,67 @@ VMAX_DONE:
                 TFR     Y,X             ; X = best index
                 LEAS    1,S             ; drop count byte
                 RTS
+
+* ============================================================
+* VCPY — Vector copy: dst = src
+* ============================================================
+* Copy V_LEN 16-bit words from V_SRC to V_DST.
+*
+* Caller sets: V_SRC, V_DST, V_LEN
+*   V_LEN is word count (not byte count).
+*
+* Exit: V_LEN words at V_DST replaced with contents of V_SRC.
+* Clobbers: X, U, W, CC
+* Uses: 6309 TFM instruction (byte-wise block copy).
+*
+* Overlap policy: forward-direction TFM (low-to-high byte copy).
+*   Safe when V_DST < V_SRC or buffers are disjoint.
+*   dst > src with overlap produces corruption (tail of source
+*   overwritten before being read).
+*
+* Edge case: V_LEN = 0 is a no-op. TFM with W=0 would transfer
+* 65536 bytes on 6309 (counter wraps). Explicit zero check guards.
+*
+* Byte count scaling: TFM counts bytes in W, so W = V_LEN * 2.
+* Uses ADDR W,W (3 bytes) because LSLW is not available in
+* LWASM 4.21 (verified via probe: "Bad opcode" error). ADDR W,W
+* is equivalent to LSLW for word counts that fit in the address
+* space (< 32768 words = < 64KB).
+* ============================================================
+VCPY:
+                LDW     V_LEN           ; W = word count
+                BEQ     VCPY_DONE       ; zero-length no-op
+                ADDR    W,W             ; W = byte count (word count * 2)
+                LDX     V_SRC
+                LDU     V_DST
+                TFM     X+,U+           ; block copy W bytes, forward
+VCPY_DONE:
+                RTS
+
+* ============================================================
+* VCLR — Vector clear: dst = 0
+* ============================================================
+* Write zero to V_LEN 16-bit words starting at V_DST.
+*
+* Caller sets: V_DST, V_LEN (word count)
+* Exit: V_LEN words at V_DST zeroed.
+* Clobbers: X, D, W, CC
+*
+* Uses W as loop counter via DECW. Register counter is safe here
+* because there is no LDD in the inner loop (STD does not clobber
+* the counter; see the LDD-clobbers-B rule in DEVIATIONS.md).
+*
+* Edge case: V_LEN = 0 is a no-op.
+* ============================================================
+VCLR:
+                LDW     V_LEN           ; W = word count
+                BEQ     VCLR_DONE       ; zero-length no-op
+                LDX     V_DST
+                CLRA
+                CLRB                    ; D = 0
+VCLR_LOOP:
+                STD     ,X++            ; store zero, advance
+                DECW
+                BNE     VCLR_LOOP
+VCLR_DONE:
+                RTS

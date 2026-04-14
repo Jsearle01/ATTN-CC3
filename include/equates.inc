@@ -103,7 +103,11 @@ SF_LEN          EQU     BW_SCRATCH+66           ; 2B softmax length
 SF_MAX          EQU     BW_SCRATCH+68           ; 2B softmax max value (internal)
 SF_SUM          EQU     BW_SCRATCH+70           ; 2B softmax exp sum (16-bit; max count=10)
 SF_OUT          EQU     BW_SCRATCH+72           ; 2B softmax output pointer
-*               BW_SCRATCH+74..+79: 6B reserved for future ACTFN expansion only
+* -------- VCPY/VCLR parameter block (V_SRC used by VCPY only) --------
+V_SRC           EQU     BW_SCRATCH+74           ; 2B source pointer (VCPY)
+V_DST           EQU     BW_SCRATCH+76           ; 2B destination pointer
+V_LEN           EQU     BW_SCRATCH+78           ; 2B word count (not byte count)
+*               BW_SCRATCH is now fully allocated (80 bytes, ends at BW_END)
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)
