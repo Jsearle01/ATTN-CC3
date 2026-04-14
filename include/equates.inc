@@ -78,10 +78,10 @@ BW_DQ           EQU     BW_DATT+SEQ*SEQ*Q15SZ
 BW_DK           EQU     BW_DQ+DSEQ*Q15SZ
 BW_DV           EQU     BW_DK+DSEQ*Q15SZ
 BW_DX           EQU     BW_DV+DSEQ*Q15SZ      ; SEQ*D*2 = 256
-BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 84B total scratch (was 80)
-BW_END          EQU     BW_SCRATCH+84         ; was +80
-*               Total: 1652 B used of 2048 B budget, 396 B headroom
-*               STACK_TOP gap: 908 bytes (was 912, negligible reduction)
+BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 100B total scratch (was 84)
+BW_END          EQU     BW_SCRATCH+100        ; was +84
+*               Total: 1668 B used of 2048 B budget, 380 B headroom
+*               STACK_TOP gap: 892 bytes (was 908)
 
 * -------- Fixed scratch locations inside BW_SCRATCH --------
 MULSCR          EQU     BW_SCRATCH              ; 4B STQ target for normalize-by-offset
@@ -122,6 +122,23 @@ VS_DST          EQU     V_DST                   ; alias: dest vector ptr
 VS_LEN          EQU     V_LEN                   ; alias: word count
 VS_SCL          EQU     BW_SCRATCH+80           ; 2B Q8 scalar (dedicated)
 *               BW_SCRATCH+82 through +83 reserved for future use
+
+* -------- EMBED parameter block (caller-filled) --------
+* EMBED parameter block is dedicated (no aliasing). Called at forward
+* pass entry before ATTN/PROJ; no other routine's state is live at the
+* call site. If a future refactor wants to reclaim these 16 bytes,
+* confirm the call graph still holds — particularly that EMBED isn't
+* called from inside ATTN or during backward pass.
+EM_TOK          EQU     BW_SCRATCH+84           ; 2B token index array ptr
+EM_TKE          EQU     BW_SCRATCH+86           ; 2B token embedding table ptr
+EM_PSE          EQU     BW_SCRATCH+88           ; 2B position embedding table ptr
+EM_OUT          EQU     BW_SCRATCH+90           ; 2B output buffer ptr
+EM_SEQ          EQU     BW_SCRATCH+92           ; 2B sequence length
+EM_DIM          EQU     BW_SCRATCH+94           ; 2B embedding dimension
+
+* -------- EMBED internal scratch (computed by routine) --------
+EM_RBS          EQU     BW_SCRATCH+96           ; 2B row byte size = EM_DIM*2
+EM_TPTR         EQU     BW_SCRATCH+98           ; 2B advancing token ptr
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)
