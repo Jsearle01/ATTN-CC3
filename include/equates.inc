@@ -78,10 +78,10 @@ BW_DQ           EQU     BW_DATT+SEQ*SEQ*Q15SZ
 BW_DK           EQU     BW_DQ+DSEQ*Q15SZ
 BW_DV           EQU     BW_DK+DSEQ*Q15SZ
 BW_DX           EQU     BW_DV+DSEQ*Q15SZ      ; SEQ*D*2 = 256
-BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 100B total scratch (was 84)
-BW_END          EQU     BW_SCRATCH+100        ; was +84
-*               Total: 1668 B used of 2048 B budget, 380 B headroom
-*               STACK_TOP gap: 892 bytes (was 908)
+BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 116B total scratch (was 100)
+BW_END          EQU     BW_SCRATCH+116        ; was +100
+*               Total: 1684 B used of 2048 B budget, 364 B headroom
+*               STACK_TOP gap: 876 bytes (was 892)
 
 * -------- Fixed scratch locations inside BW_SCRATCH --------
 MULSCR          EQU     BW_SCRATCH              ; 4B STQ target for normalize-by-offset
@@ -139,6 +139,33 @@ EM_DIM          EQU     BW_SCRATCH+94           ; 2B embedding dimension
 * -------- EMBED internal scratch (computed by routine) --------
 EM_RBS          EQU     BW_SCRATCH+96           ; 2B row byte size = EM_DIM*2
 EM_TPTR         EQU     BW_SCRATCH+98           ; 2B advancing token ptr
+
+* -------- PROJ parameter block (caller-filled) --------
+* PROJ parameter block is dedicated. Called at forward-pass exit
+* after ATTN returns; no other routine's state is live at the call
+* site.
+*
+* INVARIANT: PROJ writes to MP_MAT/MP_ROW/MP_COL once before the loop
+* and to MP_VIN/MP_OUT once per iteration as VTMUL parameters. PROJ
+* never reads MP_* values back. If a future routine calls PROJ from
+* inside an active MATOP context (where MP_* is mid-use), PROJ will
+* overwrite that context's MP_* values silently. Currently safe
+* because PROJ is called only at forward-pass exit, after ATTN's
+* MATOP usage has completed.
+*
+* Caller fields ordered to match ATTN/11's PROJ inline params:
+* yin, wout, log, seq, dim, voc — for 1:1 source comparability.
+PR_Y            EQU     BW_SCRATCH+100          ; 2B input vector base (Y [SEQ][DIM])
+PR_WOUT         EQU     BW_SCRATCH+102          ; 2B output projection weights [DIM][VOC]
+PR_LOG          EQU     BW_SCRATCH+104          ; 2B output logits buffer [SEQ][VOC]
+PR_SEQ          EQU     BW_SCRATCH+106          ; 2B sequence length
+PR_DIM          EQU     BW_SCRATCH+108          ; 2B d_model
+PR_VOC          EQU     BW_SCRATCH+110          ; 2B vocab size
+
+* -------- PROJ internal scratch (computed at routine entry) --------
+* Pre-computed once in PROJ_PROLOGUE to avoid recomputing per iteration.
+PR_YST          EQU     BW_SCRATCH+112          ; 2B Y row stride bytes = DIM*2
+PR_LST          EQU     BW_SCRATCH+114          ; 2B LOG row stride bytes = VOC*2
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)

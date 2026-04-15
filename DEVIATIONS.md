@@ -345,3 +345,14 @@ shift loop to exit immediately and producing RESULT_BITS=$0001
 regardless of actual test pass status. Both bugs have the same root
 cause: register used as counter got written by an intervening
 instruction. The stack-counter convention avoids both.
+
+## PROJ zero-length guard (defensive hardening, not semantic deviation)
+
+PROJ adds a `LDW PR_SEQ / BEQ PROJ_DONE` guard at entry. ATTN/11's
+PROJ omits this; if SEQ=0 is ever passed, the PDP-11 version
+underflows the loop counter to 65535 and runs through 64KB of
+garbage memory.
+
+This is a standard hardening pattern matching VCPY, VCLR, VSADD,
+and EMBED. Not a semantic change — under any valid input, behavior
+is identical to ATTN/11.
