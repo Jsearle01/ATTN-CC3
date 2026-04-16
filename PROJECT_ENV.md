@@ -89,6 +89,12 @@ bottom.
   but the Lua script's `emu.add_machine_frame_notifier` callback does
   not fire in that context (verified: MAME ran 209 emulated seconds
   with no `LOADED ...` print). Use `-autoboot_script`.
+- **Critical — autoboot callback lifetime**: MAME's
+  `emu.add_machine_frame_notifier` under `-autoboot_script` fires for
+  **~32 frames only** (~0.53 s at NTSC 59.94 Hz), then silently stops.
+  All Lua trampolines must detect completion and call `mach:exit()`
+  within that window. The PC-stall polling pattern (Section 6) handles
+  this; never use a fixed `WAIT_FRAMES` > 28.
 - **Exit discipline**: the Lua trampoline calls `mach:exit()` after
   printing results, so MAME self-closes. A safety `timeout 30` wrapper
   around the `mame.exe` invocation is recommended to catch harness
@@ -101,96 +107,53 @@ bottom.
 ## 6. Lua trampoline pattern
 
 Each test has a dedicated `.lua` in `/c/mame/` that loads the `.bin`,
-jumps to `$0600`, waits N frames, reads scratch RAM, and prints results.
+jumps to `$0600`, polls for completion, reads scratch RAM, and prints
+results.
 
-**Modern template** (used by t_vcpycl, t_vsadd, t_embed, t_proj):
+**PC-stall polling template** (used by t_vcpycl, t_vsadd, t_embed,
+t_proj — all four active harnesses). Detects harness completion by
+checking if PC is unchanged between two consecutive frame callbacks
+(harness sits in `HALT: BRA HALT`). Falls back to a safety timeout
+at frame 28 (inside the ~32-frame autoboot callback lifetime).
 
-```lua
--- t_NAME.lua
-local BIN_PATH = "t_NAME.bin"
-local BIN_ADDR = 0x0600
-local STAGE = "wait"
-local load_frame = nil
-local frame_count = 0
+Key parameters per trampoline (only these differ between files):
+- `BIN_PATH` — filename of `.bin` to load
+- `SCRATCH_BASE` — currently `0x2000` for all four active harnesses
+- `TEST_NAMES` — 1-based Lua table of per-test labels
+- `BITS_WIDTH` — `8` for ≤8 tests, `16` for >8 (e.g. t_vsadd)
+- `LAST_FAIL_ADDR` — `SCRATCH_BASE+5` when RESULT_BITS is 1 byte,
+  `SCRATCH_BASE+6` when 2 bytes
 
-local TEST_NAMES = {
-    [0] = "TEST_0_LABEL",
-    [1] = "TEST_1_LABEL",
-    -- ...
-}
+Design properties:
+- `pcall()` wraps result-reading so Lua exceptions are printed, not
+  silently swallowed
+- `io.flush()` after every `print()` — prevents stdout full-buffering
+  from eating output on MAME exit
+- `MIN_POLL_FRAME = 2` — skips initial frames to avoid false-positive
+  PC-stall during CPU startup
+- `MAX_FRAME = 28` — safety timeout, always inside the autoboot window
 
-emu.add_machine_frame_notifier(function()
-    local mach = manager.machine
-    if not mach then return end
-    local cpu = mach.devices[":maincpu"]
-    if not cpu then return end
-    local mem = cpu.spaces["program"]
-    if not mem then return end
-    frame_count = frame_count + 1
-
-    if STAGE == "wait" then
-        if frame_count < 3 then return end                -- let BASIC settle
-        local f = io.open(BIN_PATH, "rb")
-        if not f then print("FAIL: no " .. BIN_PATH); mach:exit(); return end
-        local data = f:read("*all"); f:close()
-        for i = 1, #data do mem:write_u8(BIN_ADDR + i - 1, string.byte(data, i)) end
-        print(string.format("LOADED %d bytes", #data))
-        cpu.state["PC"].value = BIN_ADDR
-        load_frame = frame_count
-        STAGE = "running"
-        return
-    end
-
-    if STAGE == "running" then
-        if (frame_count - load_frame) < WAIT_FRAMES then return end
-        local function u16(a) return mem:read_u8(a) * 256 + mem:read_u8(a+1) end
-        local pc = cpu.state["PC"].value
-        local pass_cnt = u16(0x1700)
-        local fail_cnt = u16(0x1702)
-        local bits = mem:read_u8(0x1704)
-        local last_fail = mem:read_u8(0x1705)
-        print(string.format("PC=$%04X", pc))
-        print(string.format("PASS_CNT=%d FAIL_CNT=%d", pass_cnt, fail_cnt))
-        print(string.format("RESULT_BITS=$%02X LAST_FAIL_ID=$%02X", bits, last_fail))
-        print("")
-        for i = 0, N-1 do
-            local bit_set = (bits >> i) & 1
-            local status = bit_set == 1 and "PASS" or "FAIL"
-            print(string.format("TEST_%d (%s): %s", i, TEST_NAMES[i], status))
-        end
-        print(string.format("Total: %d/N pass", pass_cnt))
-        STAGE = "done"
-        mach:exit()
-    end
-end)
-```
-
-**WAIT_FRAMES tuning** — how many frames after PC-set before reading results:
-
-| Harness  | WAIT_FRAMES (in Lua) | Notes                                  |
-|----------|----------------------|----------------------------------------|
-| t_vcpycl | 5                    | tiny, primitive tests                  |
-| t_proj   | 30                   | heavy VTMUL; may still be insufficient |
-| t_embed  | (verify)             | 6 tests, moderate                      |
-| t_vsadd  | (verify)             | 10 tests, light                        |
+Reference implementation: `/c/mame/t_vcpycl.lua` (simplest, 8 tests).
 
 Older trampolines (t_fxmath, t_vecop, t_matop, t_vmax, t_fxdiv,
-t_exptbl, t_sftmx) use a different 32-bit bitmap pattern and iterate
-`for i = 0, 31 do`. Count lives in the harness, reported as
-`TOTAL: PASS=N FAIL=M (of T)` by the Lua.
+t_exptbl, t_sftmx) use a different fixed-frame-count pattern with
+32-bit bitmap iteration. They still use `$1700` scratch. Not yet
+migrated — they work but lack the PC-stall robustness.
 
-**Creating a new trampoline**: copy the nearest-matching existing file
-(e.g. `t_proj.lua` for a VTMUL-heavy test), change `BIN_PATH`,
-`TEST_NAMES`, the `for i = 0, N-1` bound, the `Total: %d/N` string,
-and tune `WAIT_FRAMES` for the test's compute weight.
+**Creating a new trampoline**: copy `t_vcpycl.lua`, change `BIN_PATH`,
+`TEST_NAMES`, `NUM_TESTS`, `BITS_WIDTH`, and `LAST_FAIL_ADDR` if
+RESULT_BITS is 2 bytes.
 
-**Scratch RAM read addresses** (modern pattern, from `include/equates.inc`):
+**Scratch RAM layout** (active harnesses, `SCRATCH_BASE = $2000`):
 
-- `$1700` — PASS_CNT (u16)
-- `$1702` — FAIL_CNT (u16)
-- `$1704` — RESULT_BITS (u8 for ≤8 tests; u16 for ≤16 like t_vsadd)
-- `$1705` — LAST_FAIL_ID (u8 when bits is u8) / `$1706` (u8 when bits is u16, e.g. t_vsadd)
-- `$1707` — CUR_TEST_ID (u8)
+- `$2000` — PASS_CNT (u16)
+- `$2002` — FAIL_CNT (u16)
+- `$2004` — RESULT_BITS (u8 or u16 depending on test count)
+- `$2005` — LAST_FAIL_ID (u8) when RESULT_BITS is 1 byte
+- `$2006` — LAST_FAIL_ID (u8) when RESULT_BITS is 2 bytes (t_vsadd)
+- `$2006`/`$2007` — CUR_TEST_ID (u8)
+
+Non-migrated harnesses still read `$1700`-based addresses.
 
 ## 7. Test execution workflow
 
@@ -200,15 +163,14 @@ cd /c/Projects/cocoai/attn6309 && \
 wsl lwasm --6309 --format=raw --includedir=. --includedir=include \
      -o build/t_proj.bin test/t_proj.asm
 
-# 2. Stage binary in MAME directory
-cp build/t_proj.bin /c/mame/t_proj.bin
+# 2. Run via mame_run.sh (copies bin, launches MAME, prints results)
+tools/mame_run.sh t_proj
 
-# 3. Run MAME with Lua trampoline (timeout wrapper catches hangs)
-cd /c/mame && timeout 30 ./mame.exe coco3h \
-    -autoboot_script t_proj.lua \
-    -skip_gameinfo -nothrottle -window 2>&1
-
-# 4. Parse stdout for the PASS_CNT / FAIL_CNT / RESULT_BITS lines.
+# Or manually:
+# cp build/t_proj.bin /c/mame/t_proj.bin
+# cd /c/mame && timeout 30 ./mame.exe coco3h \
+#     -autoboot_script t_proj.lua \
+#     -skip_gameinfo -nothrottle -window 2>&1
 ```
 
 **Stdout buffering caveat**: MAME's stdout is line-buffered to a
@@ -261,24 +223,30 @@ $0000-$01FF    VEC_BASE          Interrupt vectors (512 B)
 $0200-$03FF    CODE_BASE         Code + tables (5.3 KB allocation)
 $0400-$05FF    SCREEN            Hardware-mapped text, 32×16 (512 B)
 $0600          (harness ORG)     Test harness code loads here
-$1700-$170F    Test scratch      PASS_CNT, FAIL_CNT, RESULT_BITS, ...
-$1730-$173F    Decimal scratch   DEC_BUF, DEC_DTEMP, DEC_SCRPTR
-$1760-$17FF    Test buffers      DST_BUF, SRC_BUF (varies per harness)
-$1800-$18C7    STR_BASE          String literals (200 B)
-$1900-$191F    TOK_BASE          Tokens + target (32 B)
-$1A00-$2BFF    WEIGHT_BASE       Q16 weight accumulators (4.8 KB)
-$2C00-$37FF    GRAD_BASE         Gradient accumulators (2.4 KB)
+~$0B00-$1720   (binary tail)     End of harness binary (varies by INCLUDE depth)
+$1800-$18C7    STR_BASE          String literals (200 B, production only)
+$1900-$191F    TOK_BASE          Tokens + target (32 B, production only)
+$1A00-$2BFF    WEIGHT_BASE       Q16 weight accumulators (4.8 KB, production only)
+$2000-$20FF    Test scratch      SCRATCH_BASE: PASS_CNT, FAIL_CNT, RESULT_BITS, ...
+$2030-$203F    Decimal scratch   DEC_BUF, DEC_DTEMP, DEC_SCRPTR
+$2060-$23FF    Test buffers      DST_BUF, SRC_BUF, etc. (varies per harness)
+$2C00-$37FF    GRAD_BASE         Gradient accumulators (2.4 KB, production only)
 $3800-$3DFF    FWD_CACHE         Forward activations (1.5 KB)
 $3E00-$47FF    BWD_WORK          Backward workspace (2 KB, holds MP_*/SF_*/EM_*/PR_*/AT_*)
 $4800          STACK_TOP         Stack grows down from here
 $4800-$B7FF    FREE_BASE         ~26 KB free
 ```
 
-**Collision warning**: harness `.bin` images ORG'd at `$0600` can grow
-past `$1700` and physically overlap the test scratch. The harness
-zeros `$1700..$1707` at `RUN_TESTS` entry, so any static INCLUDE'd
-data that landed in that range is clobbered. Check binary size before
-dismissing mysterious single-test failures.
+**Scratch at $2000**: active test harnesses (t_vcpycl, t_vsadd,
+t_embed, t_proj) use `SCRATCH_BASE EQU $2000`. This reclaims the
+WEIGHT_BASE address space, which is not active during test execution.
+Non-migrated harnesses (t_fxmath, t_vecop, etc.) still use `$1700`.
+
+**Historical note**: scratch was originally at `$1700`. When t_embed's
+binary grew to 4379 B (spanning $0600-$171A) from the actfn.asm
+INCLUDE addition, static vector data at $1700-$171A was clobbered by
+the harness RUN_TESTS init. Migrating to $2000 provides ~741 B of
+clearance above the largest binary (t_embed).
 
 ## 11. Known LWASM / 6309 instruction status
 

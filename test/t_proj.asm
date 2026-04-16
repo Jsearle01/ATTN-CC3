@@ -24,23 +24,24 @@ START:
                 JSR     DISPLAY_RESULTS
 HALT:           BRA     HALT
 
-* -------- Scratch RAM --------
-PASS_CNT        EQU     $1700
-FAIL_CNT        EQU     $1702
-RESULT_BITS     EQU     $1704
-LAST_FAIL_ID    EQU     $1705
-CUR_TEST_ID     EQU     $1706
-DEC_BUF         EQU     $1730
-DEC_DTEMP       EQU     $1736
-DEC_SCRPTR      EQU     $1738
+* -------- Scratch RAM at $2000 (production memory map not active at test time) --------
+SCRATCH_BASE    EQU     $2000
+PASS_CNT        EQU     SCRATCH_BASE+0
+FAIL_CNT        EQU     SCRATCH_BASE+2
+RESULT_BITS     EQU     SCRATCH_BASE+4
+LAST_FAIL_ID    EQU     SCRATCH_BASE+5
+CUR_TEST_ID     EQU     SCRATCH_BASE+6
+DEC_BUF         EQU     SCRATCH_BASE+$30
+DEC_DTEMP       EQU     SCRATCH_BASE+$36
+DEC_SCRPTR      EQU     SCRATCH_BASE+$38
 
 * -------- Test data buffers --------
-* Y_BUF:    SEQ*DIM*2 bytes max = 8*16*2 = 256 bytes  ($1760-$185F)
-* WOUT_BUF: DIM*VOC*2 bytes max = 16*10*2 = 320 bytes ($1860-$19BF)
-* OUT_BUF:  SEQ*VOC*2 bytes max = 8*10*2 = 160 bytes  ($19C0-$1A5F)
-Y_BUF           EQU     $1760
-WOUT_BUF        EQU     $1860
-OUT_BUF         EQU     $19C0
+* Y_BUF:    SEQ*DIM*2 bytes max = 8*16*2 = 256 bytes  ($2060-$215F)
+* WOUT_BUF: DIM*VOC*2 bytes max = 16*10*2 = 320 bytes ($2160-$22BF)
+* OUT_BUF:  SEQ*VOC*2 bytes max = 8*10*2 = 160 bytes  ($22C0-$235F)
+Y_BUF           EQU     SCRATCH_BASE+$60
+WOUT_BUF        EQU     SCRATCH_BASE+$160
+OUT_BUF         EQU     SCRATCH_BASE+$2C0
 
 * ============================================================
 * RUN_TESTS
@@ -435,6 +436,7 @@ LBL_DONE:       FCC     "DONE"
                 INCLUDE src/fxmath.asm
                 INCLUDE src/vecop.asm
                 INCLUDE src/matop.asm
+                INCLUDE src/actfn.asm
                 INCLUDE src/layer.asm
 
                 INCLUDE tables/proj_vectors.asm

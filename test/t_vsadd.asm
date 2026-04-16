@@ -23,19 +23,20 @@ START:
                 JSR     DISPLAY_RESULTS
 HALT:           BRA     HALT
 
-* -------- Scratch RAM --------
-PASS_CNT        EQU     $1700           ; 2B total pass count
-FAIL_CNT        EQU     $1702           ; 2B total fail count
-RESULT_BITS     EQU     $1704           ; 2B bitmap (bits 0-9 used)
-LAST_FAIL_ID    EQU     $1706           ; 1B last-failed test ID ($FF if none)
-CUR_TEST_ID     EQU     $1707           ; 1B currently-executing test ID
-DEC_BUF         EQU     $1730           ; 5B decimal scratch
-DEC_DTEMP       EQU     $1736           ; 2B
-DEC_SCRPTR      EQU     $1738           ; 2B
+* -------- Scratch RAM at $2000 (production memory map not active at test time) --------
+SCRATCH_BASE    EQU     $2000
+PASS_CNT        EQU     SCRATCH_BASE+0          ; 2B total pass count
+FAIL_CNT        EQU     SCRATCH_BASE+2          ; 2B total fail count
+RESULT_BITS     EQU     SCRATCH_BASE+4          ; 2B bitmap (bits 0-9 used)
+LAST_FAIL_ID    EQU     SCRATCH_BASE+6          ; 1B last-failed test ID ($FF if none)
+CUR_TEST_ID     EQU     SCRATCH_BASE+7          ; 1B currently-executing test ID
+DEC_BUF         EQU     SCRATCH_BASE+$30        ; 5B decimal scratch
+DEC_DTEMP       EQU     SCRATCH_BASE+$36        ; 2B
+DEC_SCRPTR      EQU     SCRATCH_BASE+$38        ; 2B
 
 * -------- Test data buffers (sized for Test 9: 16 words) --------
-DST_BUF         EQU     $1760           ; 40B destination buffer
-SRC_BUF         EQU     $1790           ; 40B source buffer
+DST_BUF         EQU     SCRATCH_BASE+$60        ; 40B destination buffer
+SRC_BUF         EQU     SCRATCH_BASE+$90        ; 40B source buffer
 
 * ============================================================
 * RUN_TESTS — run all 10 tests, record per-test pass/fail

@@ -23,21 +23,22 @@ START:
                 JSR     DISPLAY_RESULTS
 HALT:           BRA     HALT
 
-* -------- Scratch RAM --------
-PASS_CNT        EQU     $1700
-FAIL_CNT        EQU     $1702
-RESULT_BITS     EQU     $1704
-LAST_FAIL_ID    EQU     $1705
-CUR_TEST_ID     EQU     $1706
-DEC_BUF         EQU     $1730
-DEC_DTEMP       EQU     $1736
-DEC_SCRPTR      EQU     $1738
+* -------- Scratch RAM at $2000 (production memory map not active at test time) --------
+SCRATCH_BASE    EQU     $2000
+PASS_CNT        EQU     SCRATCH_BASE+0
+FAIL_CNT        EQU     SCRATCH_BASE+2
+RESULT_BITS     EQU     SCRATCH_BASE+4
+LAST_FAIL_ID    EQU     SCRATCH_BASE+5
+CUR_TEST_ID     EQU     SCRATCH_BASE+6
+DEC_BUF         EQU     SCRATCH_BASE+$30
+DEC_DTEMP       EQU     SCRATCH_BASE+$36
+DEC_SCRPTR      EQU     SCRATCH_BASE+$38
 
 * -------- Test data buffers --------
-TOK_BUF         EQU     $1760
-TKEMB_BUF       EQU     $1780
-PSEMB_BUF       EQU     $18C0
-OUT_BUF         EQU     $19C0
+TOK_BUF         EQU     SCRATCH_BASE+$60
+TKEMB_BUF       EQU     SCRATCH_BASE+$80
+PSEMB_BUF       EQU     SCRATCH_BASE+$1C0
+OUT_BUF         EQU     SCRATCH_BASE+$2C0
 
 * ============================================================
 * RUN_TESTS
@@ -500,6 +501,7 @@ LBL_DONE:       FCC     "DONE"
                 INCLUDE src/fxmath.asm
                 INCLUDE src/vecop.asm
                 INCLUDE src/matop.asm
+                INCLUDE src/actfn.asm
                 INCLUDE src/layer.asm
 
                 INCLUDE tables/embed_vectors.asm
