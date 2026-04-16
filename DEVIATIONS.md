@@ -356,3 +356,29 @@ garbage memory.
 This is a standard hardening pattern matching VCPY, VCLR, VSADD,
 and EMBED. Not a semantic change — under any valid input, behavior
 is identical to ATTN/11.
+
+## ATTN zero-length guard (defensive hardening)
+
+ATTN adds an `LBEQ ATTN_DONE` guard at entry on AT_SEQ.
+ATTN/11's ATTN omits entry guards. SEQ=0 would underflow
+loop counters throughout the 7-step body.
+
+Standard hardening pattern matching VCPY, VCLR, VSADD,
+EMBED, and PROJ. Not a semantic change — under any valid
+input, behavior matches ATTN/11.
+
+## ATTN Step 7 residual: wrapping add, no clamp
+
+Step 7 computes Y[i][d] = O[i][d] + X[i][d] via inline
+ADDD with no overflow check. If the sum exceeds signed
+16-bit range, it wraps (ADDD semantics on 6309).
+
+This matches ATTN/11 (ADD instruction wraps on PDP-11)
+and prototype.shf line 121: `(clamp16 (+ O X))`. Note:
+prototype uses clamp16 but the assembly doesn't clamp —
+this is a known divergence between the prototype's
+idealized semantics and the actual implementation.
+
+Test ATTN_RESIDUAL_WRAP (test 2) specifically exercises
+this path with inputs that overflow. If a future change
+adds clamping, that test will fail.

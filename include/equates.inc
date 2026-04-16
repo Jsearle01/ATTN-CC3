@@ -78,10 +78,10 @@ BW_DQ           EQU     BW_DATT+SEQ*SEQ*Q15SZ
 BW_DK           EQU     BW_DQ+DSEQ*Q15SZ
 BW_DV           EQU     BW_DK+DSEQ*Q15SZ
 BW_DX           EQU     BW_DV+DSEQ*Q15SZ      ; SEQ*D*2 = 256
-BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 116B total scratch (was 100)
-BW_END          EQU     BW_SCRATCH+116        ; was +100
-*               Total: 1684 B used of 2048 B budget, 364 B headroom
-*               STACK_TOP gap: 876 bytes (was 892)
+BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 158B total scratch (was 116)
+BW_END          EQU     BW_SCRATCH+158        ; was +116 (ATTN added 42 B)
+*               Total: 1726 B used of 2048 B budget, 322 B BWD_WORK headroom
+*               STACK_TOP gap: 834 bytes (was 876)
 
 * -------- Fixed scratch locations inside BW_SCRATCH --------
 MULSCR          EQU     BW_SCRATCH              ; 4B STQ target for normalize-by-offset
@@ -166,6 +166,71 @@ PR_VOC          EQU     BW_SCRATCH+110          ; 2B vocab size
 * Pre-computed once in PROJ_PROLOGUE to avoid recomputing per iteration.
 PR_YST          EQU     BW_SCRATCH+112          ; 2B Y row stride bytes = DIM*2
 PR_LST          EQU     BW_SCRATCH+114          ; 2B LOG row stride bytes = VOC*2
+
+* -------- ATTN parameter block (caller-filled) --------
+* ATTN parameter block is dedicated. Called once per forward pass,
+* after EMBED returns and before PROJ. No live state from other
+* routines at the call site.
+*
+* Caller fields ordered to match ATTN/11's ATTN inline params for
+* 1:1 source comparability (LAYER.MAC lines 154-162 / 283-291).
+* Field names also match (AT_XIN, AT_YOT, etc.).
+*
+* AT_WRK points to an 896-byte workspace the caller must allocate
+* (Q, K, V regions 256B each + shared S/A region 128B).
+* S and A share storage: SFTMX at Step 5 writes the softmax in-place
+* over each score row, so SEQ*SEQ*2 = 128B covers both. Matches
+* ATTN/11 work budget (LAYER.MAC line 147: work >= 3*seq*dim + seq*seq).
+AT_XIN          EQU     BW_SCRATCH+116          ; 2B input X ptr [SEQ][DIM]
+AT_WQ           EQU     BW_SCRATCH+118          ; 2B Wq [DIM][DIM]
+AT_WK           EQU     BW_SCRATCH+120          ; 2B Wk [DIM][DIM]
+AT_WV           EQU     BW_SCRATCH+122          ; 2B Wv [DIM][DIM]
+AT_YOT          EQU     BW_SCRATCH+124          ; 2B output Y ptr [SEQ][DIM]
+AT_WRK          EQU     BW_SCRATCH+126          ; 2B workspace base (896B)
+AT_SEQ          EQU     BW_SCRATCH+128          ; 2B sequence length
+AT_DIM          EQU     BW_SCRATCH+130          ; 2B embedding dimension
+AT_SHF          EQU     BW_SCRATCH+132          ; 2B sqrt(d) right-shift count
+
+* -------- ATTN internal scratch (computed by routine) --------
+* Pre-computed once at entry to avoid recomputing per step.
+AT_RSZ          EQU     BW_SCRATCH+134          ; 2B row stride bytes = DIM*2
+AT_SSZ          EQU     BW_SCRATCH+136          ; 2B seq element stride = SEQ*2
+
+* -------- Workspace sub-region pointers (computed from AT_WRK) --------
+* Q/K/V occupy SEQ*DIM*2 = 256B each for Stage 1 (SEQ=8, DIM=16).
+* S/A share SEQ*SEQ*2 = 128B (see header note on in-place softmax).
+AT_QQ           EQU     BW_SCRATCH+138          ; 2B Q region base  (= AT_WRK + 0)
+AT_KK           EQU     BW_SCRATCH+140          ; 2B K region base  (= AT_WRK + 256)
+AT_VV           EQU     BW_SCRATCH+142          ; 2B V region base  (= AT_WRK + 512)
+AT_SS           EQU     BW_SCRATCH+144          ; 2B S/A region base (= AT_WRK + 768)
+
+* -------- Step 4+ cursors and inner counter (aliased with BPR helpers) --------
+* INVARIANT: AT_QI/KJ/SI/IC share storage with AT_BW/BI/BO/BC.
+*   AT_BW/BI/BO/BC are live only during Steps 1-3 (inside the AT_BPR
+*   helper). They are dead by the time AT_BPR returns for the last time.
+*   AT_QI/KJ/SI/IC are not initialized until Step 4 begins, which is
+*   strictly after all three AT_BPR invocations complete.
+*
+* The aliasing matches the VS_*/V_* pattern (VSADD aliases VCPY/VCLR
+* params). If a future refactor extends AT_BPR's scope into Step 4+,
+* or moves BPR's invocation to after Step 4's cursor init, this
+* aliasing silently breaks. Document the call graph if touching ATTN.
+AT_QI           EQU     BW_SCRATCH+146          ; 2B Q row cursor (Step 4)
+AT_KJ           EQU     BW_SCRATCH+148          ; 2B K row cursor (Step 4, resets per outer)
+AT_SI           EQU     BW_SCRATCH+150          ; 2B S/A row cursor (Steps 4-6)
+AT_IC           EQU     BW_SCRATCH+152          ; 2B inner (SEQ) counter (Step 4)
+
+AT_BW           EQU     AT_QI                   ; alias: BPR weight ptr (Steps 1-3)
+AT_BI           EQU     AT_KJ                   ; alias: BPR input ptr  (Steps 1-3)
+AT_BO           EQU     AT_SI                   ; alias: BPR output ptr (Steps 1-3)
+AT_BC           EQU     AT_IC                   ; alias: BPR counter    (Steps 1-3)
+
+* -------- Dedicated cursors (no aliasing) --------
+* AT_YI is Step-6-only (output row ptr during V^T . S[i] loop).
+* AT_OC is outer SEQ counter reused across Steps 4/5/6. Its liveness
+* overlaps AT_SI's, so AT_OC cannot share storage with any aliased slot.
+AT_YI           EQU     BW_SCRATCH+154          ; 2B Y output row cursor (Step 6)
+AT_OC           EQU     BW_SCRATCH+156          ; 2B outer SEQ counter (Steps 4-6)
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)
