@@ -60,9 +60,12 @@ buffer region with known sizes. Stage 1 could adopt this pattern
 at the integration level and leave FWD_CACHE as a future Stage-2
 concern.
 
-Decide at the Step 6 exploration phase. Flagged in LAYER_PLAN.md
-and ATTN_PLAN.md. Both the equates block `Q8SZ` definition and the
-FC_* allocations would change under path A.
+**Resolved: Path B.** The integration harness (t_integ.asm) allocates
+all intermediate buffers explicitly at SCRATCH_BASE+offsets, matching
+the pattern established by t_attn's WRK_BUF. FWD_CACHE definitions
+remain in equates.inc unchanged; the integration test does not
+reference them. No changes to Q8SZ or FC_* EQUs. FWD_CACHE cleanup
+deferred to Stage 2 (when FORWRD/BKWRD routines need cache storage).
 
 ## Known divergences from prototype.shf (inherited from ATTN/11)
 
