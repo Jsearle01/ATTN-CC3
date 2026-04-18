@@ -79,9 +79,9 @@ BW_DK           EQU     BW_DQ+DSEQ*Q15SZ
 BW_DV           EQU     BW_DK+DSEQ*Q15SZ
 BW_DX           EQU     BW_DV+DSEQ*Q15SZ      ; SEQ*D*2 = 256
 BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 158B total scratch (was 116)
-BW_END          EQU     BW_SCRATCH+192        ; was +158 (CLOSS added 34 B)
-*               Total: 1760 B used of 2048 B budget, 288 B BWD_WORK headroom
-*               STACK_TOP gap: 800 bytes (was 834)
+BW_END          EQU     BW_SCRATCH+232        ; was +192 (BKWRD Step 1 added 40 B)
+*               Total: 1800 B used of 2048 B budget, 248 B BWD_WORK headroom
+*               STACK_TOP gap: 728 bytes (was 800)
 
 * -------- Fixed scratch locations inside BW_SCRATCH --------
 MULSCR          EQU     BW_SCRATCH              ; 4B STQ target for normalize-by-offset
@@ -245,7 +245,36 @@ CL_AHI          EQU     BW_SCRATCH+166          ; 2B 32-bit loss accumulator hig
 CL_ALO          EQU     BW_SCRATCH+168          ; 2B 32-bit loss accumulator low
 CL_VST          EQU     BW_SCRATCH+170          ; 2B VOC stride = VOC*2
 CL_TMP          EQU     BW_SCRATCH+172          ; 20B softmax temp (VOC=10 max)
-*               BW_SCRATCH total: 192 B (was 158). STACK_TOP gap: 800 B.
+* -------- BKWRD parameter block (caller-filled at BKWRD entry) --------
+* BKWRD runs during training step, strictly after CLOSS/REPORT.
+* BK_DL aliases CL_TMP — both are VOC-word softmax temp buffers
+* used in different phases: CLOSS during REPORT, BKWRD during step.
+BK_DL           EQU     CL_TMP                  ; 20B dLogits temp (aliases CL_TMP)
+
+BK_LOG          EQU     BW_SCRATCH+192          ; 2B logits [SEQ][VOC] (fwd cache)
+BK_TGT          EQU     BW_SCRATCH+194          ; 2B target tokens [SEQ]
+BK_YY           EQU     BW_SCRATCH+196          ; 2B Y [SEQ][DIM] (fwd cache)
+BK_WOUT         EQU     BW_SCRATCH+198          ; 2B Wout [DIM][VOC] (Q8)
+BK_XX           EQU     BW_SCRATCH+200          ; 2B X [SEQ][DIM] (fwd cache, Steps 5-6)
+BK_WQ           EQU     BW_SCRATCH+202          ; 2B Wq [DIM][DIM] (Q8, Step 5)
+BK_WK           EQU     BW_SCRATCH+204          ; 2B Wk [DIM][DIM] (Q8, Step 5)
+BK_WV           EQU     BW_SCRATCH+206          ; 2B Wv [DIM][DIM] (Q8, Step 5)
+BK_WRK          EQU     BW_SCRATCH+208          ; 2B ATTN workspace base (Q/K/V/A ptrs)
+BK_DWOUT        EQU     BW_SCRATCH+210          ; 2B dWout [DIM][VOC] output (Q15)
+BK_DY           EQU     BW_SCRATCH+212          ; 2B dY [SEQ][DIM] output (Q15)
+BK_SEQ          EQU     BW_SCRATCH+214          ; 2B sequence length
+BK_DIM          EQU     BW_SCRATCH+216          ; 2B embedding dimension
+BK_VOC          EQU     BW_SCRATCH+218          ; 2B vocab size
+BK_SHF          EQU     BW_SCRATCH+220          ; 2B sqrt(d) shift (Step 3)
+
+* -------- BKWRD internal scratch --------
+BK_RSZ          EQU     BW_SCRATCH+222          ; 2B row stride = DIM*2
+BK_VST          EQU     BW_SCRATCH+224          ; 2B vocab stride = VOC*2
+BK_SST          EQU     BW_SCRATCH+226          ; 2B seq stride = SEQ*2
+BK_YI           EQU     BW_SCRATCH+228          ; 2B Y row cursor (Step 1)
+BK_DYI          EQU     BW_SCRATCH+230          ; 2B dY row cursor (Step 1)
+*               Steps 2-6 fields start at BW_SCRATCH+232 (future)
+*               BW_SCRATCH total: 232 B. STACK_TOP gap: 728 B.
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)

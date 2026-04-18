@@ -126,6 +126,176 @@ CL_ZERO:
                 RTS
 
 * ============================================================
+* BKWRD — Backward pass (6 steps)
+* ============================================================
+* Computes gradients for all weights and embeddings.
+* Reverse of forward pass (PROJ → ATTN → EMBED).
+*
+* Caller sets: BK_LOG, BK_TGT, BK_YY, BK_WOUT, BK_XX,
+*   BK_WQ, BK_WK, BK_WV, BK_WRK, BK_DWOUT, BK_DY,
+*   BK_SEQ, BK_DIM, BK_VOC, BK_SHF
+*
+* Caller contract: all gradient output buffers must be zeroed
+*   before calling BKWRD. BKWRD accumulates via OUTER — does
+*   not zero internally. Training loop calls ZEROG before BKWRD.
+*
+* Gradient format: Q15. Q8 × Q15 = Q23, >>8 → Q15.
+*   Same shift as forward — all primitives (VTMUL, MVMUL, MVADD,
+*   OUTER, VDOT, VSADD) use identical >>8.
+*
+* BK_DL aliases CL_TMP: CLOSS/BKWRD never concurrent.
+*
+* Clobbers: X, Y, U, D, W, CC, MP_*, SF_*, BK_* internal
+*
+* Steps: 1 (dLogits→dWout,dY). Steps 2-6 future.
+* ============================================================
+BKWRD:
+                LDD     BK_SEQ
+                LBEQ    BKWRD_DONE      ; zero-length guard
+
+* Pre-compute strides
+                LDD     BK_DIM
+                LSLD
+                STD     BK_RSZ          ; DIM*2
+                LDD     BK_VOC
+                LSLD
+                STD     BK_VST          ; VOC*2
+                LDD     BK_SEQ
+                LSLD
+                STD     BK_SST          ; SEQ*2
+
+* Init row cursors
+                LDD     BK_YY
+                STD     BK_YI           ; Y row cursor
+                LDD     BK_DY
+                STD     BK_DYI          ; dY row cursor
+
+* ============================================================
+* Step 1: dLogits → dWout, dY
+* ============================================================
+* For each position i:
+*   dL = softmax(logits[i]) - one_hot(target[i]), <<7 → Q15
+*   dWout += OUTER(Y[i], dL)
+*   dY[i] = MVMUL(Wout, dL)
+*
+* Pointer plan:
+*   X = logits row ptr (register; copy loop advances to next row)
+*   U = target ptr (register; LDD ,U++ advances by 2)
+*   BK_YI = Y row cursor (in scratch; loaded for OUTER, advanced)
+*   BK_DYI = dY row cursor (in scratch; loaded for MVMUL, advanced)
+*   X and U saved/restored across SFTMX/OUTER/MVMUL via stack.
+* ============================================================
+
+                LDX     BK_LOG          ; logits cursor
+                LDU     BK_TGT          ; target cursor
+                LDA     BK_SEQ+1
+                PSHS    A               ; outer counter; stack: [cnt]
+
+BK1_LOOP:
+* --- 1a. Copy logits[i] → BK_DL (VOC words) ---
+* X points to logits[i]; copy advances X to logits[i+1].
+                LDY     #BK_DL
+                LDB     BK_VOC+1
+                PSHS    B               ; copy counter
+BK1_COPY:
+                LDD     ,X++
+                STD     ,Y++
+                DEC     ,S
+                BNE     BK1_COPY
+                LEAS    1,S
+* X now at logits[i+1]. Save X (next row) and U (target) across JSRs.
+                PSHS    X,U             ; stack: [X(2) U(2) cnt(1)]
+
+* --- 1b. SFTMX on BK_DL in-place → Q8 probabilities ---
+                LDD     #BK_DL
+                STD     SF_VEC
+                STD     SF_OUT
+                LDD     BK_VOC
+                STD     SF_LEN
+                JSR     SFTMX
+
+* --- 1c. One-hot subtraction: BK_DL[target[i]] -= 256 ---
+* Peek at saved U on stack to get target index.
+* Stack: [X(2) U(2) cnt(1)]. U is at 2,S.
+                LDX     2,S             ; X = saved U (target ptr)
+                LDD     ,X              ; D = target token index (0..VOC-1)
+                LSLD                    ; D = byte offset into BK_DL
+                LDY     #BK_DL
+                LEAY    D,Y             ; Y = &BK_DL[target]
+                LDD     ,Y              ; D = softmax probability (Q8)
+                SUBD    #256            ; subtract one-hot (no clamp needed)
+                STD     ,Y              ; store back
+
+* --- 1d. dL <<= 7 (Q8 → Q15, per-element) ---
+                LDX     #BK_DL
+                LDB     BK_VOC+1
+                PSHS    B               ; shift counter
+BK1_S7:
+                LDD     ,X
+                LSLD
+                LSLD
+                LSLD
+                LSLD
+                LSLD
+                LSLD
+                LSLD
+                STD     ,X++
+                DEC     ,S
+                BNE     BK1_S7
+                LEAS    1,S
+
+* --- 1e. dWout += OUTER(Y[i], dL) ---
+                LDD     BK_DWOUT
+                STD     MP_MAT
+                LDD     BK_YI
+                STD     MP_VIN          ; vx = Y[i]
+                LDD     #BK_DL
+                STD     MP_OUT          ; vy = dL
+                LDD     BK_DIM
+                STD     MP_ROW
+                LDD     BK_VOC
+                STD     MP_COL
+                JSR     OUTER
+
+* --- 1f. dY[i] = MVMUL(Wout, dL) ---
+                LDD     BK_WOUT
+                STD     MP_MAT
+                LDD     #BK_DL
+                STD     MP_VIN          ; vin = dL
+                LDD     BK_DYI
+                STD     MP_OUT          ; vout = dY[i]
+                LDD     BK_DIM
+                STD     MP_ROW
+                LDD     BK_VOC
+                STD     MP_COL
+                JSR     MVMUL
+
+* --- Advance cursors ---
+                LDD     BK_YI
+                ADDD    BK_RSZ
+                STD     BK_YI
+                LDD     BK_DYI
+                ADDD    BK_RSZ
+                STD     BK_DYI
+
+* Restore X (logits next row) and U (target ptr)
+                PULS    X,U             ; stack: [cnt]
+* U was the saved target ptr BEFORE LDD ,U++.
+* We need to advance U past the target we consumed.
+                LEAU    2,U             ; advance target ptr by 1 word
+
+                DEC     ,S
+                LBNE    BK1_LOOP
+                LEAS    1,S
+
+* ============================================================
+* Steps 2-6: (future)
+* ============================================================
+
+BKWRD_DONE:
+                RTS
+
+* ============================================================
 * LOGTBL — 257-entry Q12 cross-entropy lookup table
 * ============================================================
                 INCLUDE tables/logtbl.asm
