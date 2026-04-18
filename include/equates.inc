@@ -79,9 +79,9 @@ BW_DK           EQU     BW_DQ+DSEQ*Q15SZ
 BW_DV           EQU     BW_DK+DSEQ*Q15SZ
 BW_DX           EQU     BW_DV+DSEQ*Q15SZ      ; SEQ*D*2 = 256
 BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 158B total scratch (was 116)
-BW_END          EQU     BW_SCRATCH+158        ; was +116 (ATTN added 42 B)
-*               Total: 1726 B used of 2048 B budget, 322 B BWD_WORK headroom
-*               STACK_TOP gap: 834 bytes (was 876)
+BW_END          EQU     BW_SCRATCH+192        ; was +158 (CLOSS added 34 B)
+*               Total: 1760 B used of 2048 B budget, 288 B BWD_WORK headroom
+*               STACK_TOP gap: 800 bytes (was 834)
 
 * -------- Fixed scratch locations inside BW_SCRATCH --------
 MULSCR          EQU     BW_SCRATCH              ; 4B STQ target for normalize-by-offset
@@ -231,6 +231,21 @@ AT_BC           EQU     AT_IC                   ; alias: BPR counter    (Steps 1
 * overlaps AT_SI's, so AT_OC cannot share storage with any aliased slot.
 AT_YI           EQU     BW_SCRATCH+154          ; 2B Y output row cursor (Step 6)
 AT_OC           EQU     BW_SCRATCH+156          ; 2B outer SEQ counter (Steps 4-6)
+
+* -------- CLOSS parameter block (caller-filled) --------
+* Called during training-loop reporting. Strictly after BKWRD/UPDAT.
+* No liveness conflict with AT_* or future BK_*.
+CL_LOG          EQU     BW_SCRATCH+158          ; 2B logits ptr [SEQ][VOC]
+CL_TGT          EQU     BW_SCRATCH+160          ; 2B target tokens ptr [SEQ]
+CL_SEQ          EQU     BW_SCRATCH+162          ; 2B sequence length
+CL_VOC          EQU     BW_SCRATCH+164          ; 2B vocab size
+
+* -------- CLOSS internal scratch --------
+CL_AHI          EQU     BW_SCRATCH+166          ; 2B 32-bit loss accumulator high
+CL_ALO          EQU     BW_SCRATCH+168          ; 2B 32-bit loss accumulator low
+CL_VST          EQU     BW_SCRATCH+170          ; 2B VOC stride = VOC*2
+CL_TMP          EQU     BW_SCRATCH+172          ; 20B softmax temp (VOC=10 max)
+*               BW_SCRATCH total: 192 B (was 158). STACK_TOP gap: 800 B.
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)
