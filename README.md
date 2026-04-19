@@ -1,51 +1,164 @@
-# ATTN/11 → HD6309 Port (Stage 1)
+# ATTN-CC3 — Transformer on the TRS-80 Color Computer 3
 
-Port of ATTN/11 (github.com/dbrll/ATTN-11), a single-layer transformer that
-trains to reverse sequences of digits, from PDP-11 MACRO-11 to HD6309
-assembly targeting the TRS-80 Color Computer 3.
+A complete transformer neural network (single-head attention, forward pass + training)
+ported from PDP-11 assembly to Hitachi HD6309 assembly, running on the CoCo3 under MAME.
 
-## Stage 1 Goals
-- Single-node 6309 implementation on bare-metal CoCo3
-- Match ATTN/11 numerics exactly (Q8/Q15/Q16 fixed-point)
-- Converge to accuracy 1.0 in ~350 steps
-- Runtime 6-8 minutes at 1.78MHz
-- Total memory ~17KB
+**172 tests passing | 0 failing**
 
-## Build Order
-1. FXMATH  — scalar primitives
-2. Test harness validating against reference vectors
-3. VECOP   — dot product, scaling
-4. MATOP   — matrix-vector multiply
-5. ACTFN   — softmax, tanh, lookup tables
-6. LAYER   — embedding, attention, projection
-7. TRAIN   — SGD loop
+## What this is
 
-Each stage must pass tests before the next is implemented.
+- A port of ATTN/11 (a minimal transformer implementation in PDP-11 assembly) to the HD6309 processor on the TRS-80 Color Computer 3
+- The model learns a digit-reversal task: input 8 random digits [0-9], predict the reversed sequence
+- Architecture: single-head attention with d_model=16, seq_len=8, vocab=10
+- All arithmetic is fixed-point: Q8 activations, Q15 gradients, Q16 weight accumulators
+- No floating point hardware — everything is integer math with explicit shift-and-clamp
 
-## Golden Reference (from ATTN/11 PDP-11 run)
-    STEP  50 LOSS=1.6113 ACC=0.217
-    STEP 100 LOSS=2.1865 ACC=0.255
-    STEP 150 LOSS=2.1511 ACC=0.267
-    STEP 200 LOSS=1.3874 ACC=0.395
-    STEP 250 LOSS=0.0500 ACC=0.662
-    STEP 300 LOSS=0.0019 ACC=0.982
-    STEP 350 LOSS=0.0009 ACC=1.000
+## Technical stack
 
-These are the values our port must reproduce.
+- **Processor:** Hitachi HD6309 (enhanced 6809) in native mode
+- **Platform:** TRS-80 Color Computer 3 (CoCo3), emulated via MAME 0.281
+- **Assembler:** LWASM (6309 mode)
+- **Reference:** ATTN/11 PDP-11 assembly + prototype.shf (Clojure-like Q8 reference)
+- **Test framework:** Per-routine test harnesses with Lua trampolines for automated MAME execution
+- **Validation:** Byte-exact match against Q8 reference for all operations
 
-## Toolchain
-- Assembler: LWASM
-- Emulator: MAME coco3h (headless for CI)
-- Reference generator: Python 3 (tables/ref_attn11.py)
+## Architecture
+
+```
+Layer        What it does                              Tests
+─────────────────────────────────────────────────────────────
+FXMATH       Q8/Q15 fixed-point multiply, divide       64
+VECOP        Vector dot, add, sub, scale, max,          44
+             copy, clear, scalar-add
+MATOP        Matrix-vector multiply (MVMUL, VTMUL),     21
+             matrix-vector add (MVADD), outer product
+ACTFN        Softmax (LUT-based), exp table,            25
+             fixed-point division
+LAYER        EMBED (token+position embedding)            6
+             PROJ (output projection via VTMUL)          5
+             ATTN (7-step attention composite)           5
+Integration  Full forward pass: EMBED→ATTN→PROJ          1
+TRAIN        CLOSS (cross-entropy loss)                  4
+             BKWRD Step 1 (dLogits, dWout, dY)           4
+             BKWRD Steps 2-3 (dA, dV, dSc)              4
+```
+
+## Current status
+
+**Forward pass: COMPLETE.** Full inference pipeline validated end-to-end with byte-exact
+match against Q8 reference. Tokens in → logits out, through embedding, single-head
+attention (Q/K/V projections, scaled dot-product scores, softmax, weighted aggregation,
+residual connection), and output projection.
+
+**Backward pass: IN PROGRESS (3 of 6 steps done).**
+
+- ✅ Step 1: dLogits → dWout, dY (softmax-minus-one-hot, <<7 shift, OUTER + MVMUL)
+- ✅ Step 2: dA, dV from backward through O=A@V (VDOT + VSADD)
+- ✅ Step 3: dSc from softmax backward (clamped subtract, inline multiply, variable shift)
+- 🔲 Step 4: dQ, dK from backward through Q·K^T (VTMUL + column extraction)
+- 🔲 Step 5: dX + weight gradients dWq/dWk/dWv (MVADD + OUTER triple accumulation)
+- 🔲 Step 6: Embedding gradients (scatter-add with clamping)
+
+**Not yet started:**
+
+- UPDAT: SGD weight update with Q16 accumulators, weight initialization
+- Training loop: sample generation, loss reporting, convergence tracking
+- Training validation: run N steps, verify loss decreases and accuracy increases
+
+## Key technical achievements
+
+1. **No new primitives needed for backward pass.** Every backward operation maps to an
+   existing forward-pass primitive (VTMUL, MVMUL, MVADD, OUTER, VDOT, VSADD). Q8×Q15→Q15
+   uses the identical >>8 shift as Q8×Q8→Q8.
+
+2. **Per-product vs full-row accumulation semantics.** VTMUL uses per-product
+   shift-accumulate (documented as deliberate in ATTN/11: "Per-product Q8 rounding,
+   acceptable for d_model=16"). MVMUL uses full 32-bit row accumulation. Both validated
+   against PDP-11 source and prototype.
+
+3. **Automated test execution via MAME Lua trampolines.** PC-stall polling detects
+   harness completion within MAME's ~30-frame autoboot callback window. No manual
+   intervention needed.
+
+4. **Mixed-precision gradient arithmetic.** Forward activations in Q8, gradients in
+   Q15, weight accumulators in Q16 — all using the same shift-based primitives with
+   different semantic interpretation.
+
+## Repository structure
+
+```
+include/
+  equates.inc          Memory map, parameter blocks (MP_*, SF_*, EM_*, PR_*, AT_*, CL_*, BK_*)
+  macros.inc           Assembly macros
+  fxmath.inc           Fixed-point math constants
+
+src/
+  fxmath.asm           Q8/Q15 multiply and divide
+  vecop.asm            Vector operations (VDOT, VADD, VSUB, VSCL, VMAX, VCPY, VCLR, VSADD)
+  matop.asm            Matrix operations (MVMUL, MVADD, VTMUL, OUTER)
+  actfn.asm            Activation functions (SFTMX, EXPTBL, FXDIV)
+  layer.asm            Forward composites (EMBED, PROJ, ATTN + AT_BPR helper)
+  train.asm            Training routines (CLOSS, BKWRD Steps 1-3, future: Steps 4-6 + UPDAT)
+
+tables/
+  gen_*.py             Reference generators (Python, produce test vectors)
+  *_vectors.asm        Generated test vectors
+  exptbl.asm           256-entry exp lookup table for softmax
+  logtbl.asm           257-entry log lookup table for cross-entropy loss
+
+test/
+  t_*.asm              Per-routine test harnesses
+
+tools/
+  mame_run.sh          MAME test execution wrapper
+```
+
+## Key project files
+
+- `PROJECT_ENV.md` — Tool paths, MAME invocation, development environment
+- `DEVIATIONS.md` — Deliberate divergences from ATTN/11 (zero-length guards, residual wrapping, etc.)
+- `INTEGRATION_NOTES.md` — Known issues for forward-pass integration (FWD_CACHE sizing)
+- `ATTN_PLAN.md` — ATTN composite architecture and implementation plan
+- `TRAIN_PLAN.md` — Training phase plan with memory budget and implementation order
+
+## Building and testing
+
+```bash
+# Assemble a test harness
+lwasm --6309 --format=raw --includedir=. --includedir=include -o test/t_proj.bin test/t_proj.asm
+
+# Run under MAME (requires CoCo3 ROMs in /c/mame/)
+tools/mame_run.sh t_proj
+
+# Run all active harnesses
+for t in t_vcpycl t_vsadd t_embed t_proj t_attn t_integ t_closs t_bkwrd1 t_bkwrd23; do
+  echo "=== $t ===" && tools/mame_run.sh $t
+done
+```
+
+## What remains
+
+**To complete training:**
+
+1. BKWRD Steps 4-6 (~3 sessions)
+2. UPDAT — SGD weight update + initialization (~1 session)
+3. Training loop integration + digit-reversal task (~1-2 sessions)
+4. Training validation — verify loss decreases and model learns (~1 session)
+
+**Deferred polish:**
+
+- t_attn_full standalone harness (SEQ=8 DIM=16 production dimensions)
+- Shared test-framework include (harness_common.asm)
+- MATOP sign-extension optimization
+- SFTMX max-count documentation
 
 ## License
 
 ATTN-CC3 is licensed under the GNU General Public License v3.0.
 See [LICENSE](LICENSE) for the full text.
 
-## Acknowledgments
+## Credits
 
-This project is a port of [ATTN/11](https://github.com/dbrll/ATTN-11)
-by Damien Boureille, originally written in PDP-11 assembly.
-ATTN/11 is MIT-licensed; this port is GPL-3.0-licensed as
-permitted by the MIT license's relicensing terms.
+Ported from [ATTN/11](https://github.com/dbrll/ATTN-11) by Jay Searle with Claude (Anthropic).
+ATTN/11 original by Damien Boureille, MIT-licensed; this port is GPL-3.0 as permitted by
+the MIT license's relicensing terms.
