@@ -13,10 +13,18 @@ DSEQ            EQU     D*SEQ           ; 128, activation row size
 DD              EQU     D*D             ; 256, square weight size
 DV              EQU     D*V             ; 160, embed/out proj size
 
-* -------- Learning rates (Q16, = rate * 65536) --------
-LR_QKV          EQU     5243            ; 0.08   * 65536
-LR_EMB          EQU     655             ; 0.01   * 65536
-LR_WOUT         EQU     164             ; 0.0025 * 65536
+* -------- Learning rate shifts (WUPDT uses grad>>(shift-1)) --------
+* Matches ATTN/11 UPDAT.MAC LR.EMB/LR.ATN/LR.OUT. Effective learning
+* rate = 2^-shift in real-unit terms (see TRAIN_PLAN.md Q5).
+LR_SHF_EMB      EQU     4               ; tok_emb, pos_emb: grad >> 3
+LR_SHF_ATN      EQU     1               ; Wq, Wk, Wv:       grad >> 0
+LR_SHF_OUT      EQU     6               ; Wout:              grad >> 5
+
+* -------- RAND PRNG constants (UPDAT.MAC 15-bit LCG) --------
+RN_MUL          EQU     25173
+RN_ADD          EQU     13849
+RN_MASK         EQU     $7FFF           ; keep 15 bits
+RN_INIT         EQU     887             ; initial seed
 
 * -------- Training --------
 MAXSTEPS        EQU     400             ; target ~350
@@ -79,9 +87,9 @@ BW_DK           EQU     BW_DQ+DSEQ*Q15SZ
 BW_DV           EQU     BW_DK+DSEQ*Q15SZ
 BW_DX           EQU     BW_DV+DSEQ*Q15SZ      ; SEQ*D*2 = 256
 BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 158B total scratch (was 116)
-BW_END          EQU     BW_SCRATCH+296        ; was +292 (BKWRD Steps 4-6 added 4 B)
-*               Total: 1864 B used of 2048 B budget, 184 B BWD_WORK headroom
-*               STACK_TOP gap: 664 bytes (was 668)
+BW_END          EQU     BW_SCRATCH+308        ; was +296 (UPDAT added 12 B)
+*               Total: 1876 B used of 2048 B budget, 172 B BWD_WORK headroom
+*               STACK_TOP gap: 684 bytes (was 696)
 
 * -------- Fixed scratch locations inside BW_SCRATCH --------
 MULSCR          EQU     BW_SCRATCH              ; 4B STQ target for normalize-by-offset
@@ -291,6 +299,21 @@ BK_AI           EQU     BW_SCRATCH+244          ; 2B A row cursor (Steps 2-3)
 BK_DAI          EQU     BW_SCRATCH+246          ; 2B dA row cursor (Steps 2-3)
 * Step 3 scalar temp: dot(A[i], dA[i]) reused across the SEQ inner j's.
 BK_DAD          EQU     BW_SCRATCH+248          ; 2B dot_ad temp (Step 3)
+
+* -------- UPDAT parameter block (shared by WUPDT_ONE, CVT16_ONE, INITW_ONE) --------
+* Called 6 times per operation (once per weight group). Caller fills
+* UP_* fields, then JSRs to the *_ONE helper. UP_PTR is aux:
+*   WUPDT: gradient ptr (read + zero per element)
+*   CVT16: Q8 destination ptr
+*   INITW: unused (writes only hi/lo)
+UP_WHI          EQU     BW_SCRATCH+296          ; 2B weight hi array ptr
+UP_WLO          EQU     BW_SCRATCH+298          ; 2B weight lo array ptr
+UP_PTR          EQU     BW_SCRATCH+300          ; 2B aux ptr (grad | Q8 dest)
+UP_CNT          EQU     BW_SCRATCH+302          ; 2B element count
+UP_SHF          EQU     BW_SCRATCH+304          ; 2B lr_shift (WUPDT only)
+
+* -------- RAND PRNG state --------
+RN_SED          EQU     BW_SCRATCH+306          ; 2B LCG seed (init to RN_INIT)
 
 * -------- BKWRD Step 4 column-extract temp (forward-allocated) --------
 * DTMP holds one column of dSc (SEQ words) during dK computation.

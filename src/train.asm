@@ -855,6 +855,275 @@ BKWRD_DONE:
                 RTS
 
 * ============================================================
+* WUPDT_ONE — SGD update for one weight group (Q16 split hi/lo)
+* ============================================================
+* Caller sets: UP_WHI, UP_WLO, UP_PTR (gradient), UP_CNT, UP_SHF.
+*
+* For each element i:
+*   delta = grad[i] >> (UP_SHF - 1)    ; arithmetic right shift
+*   grad[i] = 0                          ; zero immediately after read
+*   w_hi:w_lo -= delta                   ; 32-bit subtract via NEG+ADD
+*
+* 32-bit subtract sequence (matches ATTN/11 UPDAT.MAC:133-147):
+*   D = -delta       (NEGD gives two's complement)
+*   W = D            (TFR D,W preserves -delta for sign test later,
+*                     since ADDD will destroy both D and the V/N flags)
+*   w_lo += D        (ADDD ,Y / STD ,Y++; sets carry if unsigned overflow)
+*   if carry: w_hi += 1  (BCC/LDD/ADDD #1/STD)
+*   if -delta < 0 (TSTW / BPL): w_hi -= 1  ; sign extension
+*
+* The sign-extension step handles the high-word propagation for
+* negative -delta (i.e. positive delta, where w -= positive reduces w).
+*
+* PDP-11 version keeps -delta in R0 across the ADD (ADD doesn't clobber
+* source). 6309 ADDD clobbers D, so we preserve -delta in W.
+*
+* Gradient zero: LDD ,U followed by two CLR ,U+ (1-byte increments
+* total 2 bytes) mirrors PDP-11 MOV (R4),R0 / CLR (R4)+. Belt-and-
+* suspenders with ZEROG's bulk zero.
+*
+* UP_SHF >= 1 guaranteed (shift count = UP_SHF - 1 can be 0 for LR.ATN).
+* If UP_SHF == 0, DECA wraps to 255 and the ASRD loop runs too long;
+* caller contract prevents this.
+*
+* Clobbers: X, Y, U, D, W, E, CC. Counter: stack byte (UP_CNT <= 255).
+* ============================================================
+WUPDT_ONE:
+                LDD     UP_CNT
+                LBEQ    WU_DONE         ; zero-length guard
+
+                LDX     UP_WHI
+                LDY     UP_WLO
+                LDU     UP_PTR          ; gradient array cursor
+
+* Pre-compute shift count (UP_SHF - 1) and push onto stack
+                LDA     UP_SHF+1
+                DECA                    ; A = shift count (0..5 for our LR constants)
+                PSHS    A               ; stack: [shf]
+
+                LDA     UP_CNT+1
+                PSHS    A               ; stack: [cnt shf]
+
+WU_LOOP:
+* --- Read gradient, zero slot ---
+                LDD     ,U              ; D = grad[i] (Q15)
+                CLR     ,U+             ; zero hi byte, advance U by 1
+                CLR     ,U+             ; zero lo byte, advance U by 1
+
+* --- Apply shift: delta = grad >> shift_count ---
+                LDE     1,S             ; E = shift count (at 1,S)
+                BEQ     WU_NOSHF
+WU_SHF:
+                ASRD                    ; signed >>1
+                DECE
+                BNE     WU_SHF
+WU_NOSHF:
+
+* --- 32-bit subtract: w -= delta via NEG + ADD + carry + sign-ext ---
+                NEGD                    ; D = -delta
+                TFR     D,W             ; W = -delta (preserved for sign test)
+                ADDD    ,Y              ; D = (-delta) + w_lo; carry set on unsigned overflow
+                STD     ,Y++            ; store new w_lo, advance Y
+                BCC     WU_NOCY
+                LDD     ,X              ; w_hi += 1 (carry propagation)
+                ADDD    #1
+                STD     ,X
+WU_NOCY:
+                TSTW                    ; test sign of preserved -delta
+                BPL     WU_NOSEX        ; -delta >= 0 → no sign extension
+                LDD     ,X              ; -delta < 0 → w_hi -= 1 (sign extension)
+                SUBD    #1
+                STD     ,X
+WU_NOSEX:
+                LEAX    2,X             ; advance w_hi cursor
+
+                DEC     ,S              ; inner counter
+                BNE     WU_LOOP
+                LEAS    2,S             ; drop counter and shift_cnt
+WU_DONE:
+                RTS
+
+* ============================================================
+* CVT16_ONE — Convert Q16 hi:lo pairs to Q8 (one weight group)
+* ============================================================
+* Caller sets: UP_WHI, UP_WLO, UP_PTR (Q8 destination), UP_CNT.
+*
+* Q8 = middle 16 bits of Q16 = bits [23:8] of (hi << 16 | lo).
+* On 6309 big-endian memory:
+*   hi word bytes: [hi_msb(bits31-24), hi_lsb(bits23-16)]
+*   lo word bytes: [lo_msb(bits15-8),  lo_lsb(bits7-0)]
+*   Q8 high byte = hi_lsb @ (X+1)
+*   Q8 low  byte = lo_msb @ (Y+0)
+*
+* No clamp (matches ATTN/11 ASHC #-8). Trusts Q16 stays within Q15 range.
+*
+* Clobbers: X, Y, U, D, CC. Counter: stack byte.
+* ============================================================
+CVT16_ONE:
+                LDD     UP_CNT
+                LBEQ    CV_DONE
+
+                LDX     UP_WHI
+                LDY     UP_WLO
+                LDU     UP_PTR          ; Q8 destination cursor
+
+                LDA     UP_CNT+1
+                PSHS    A               ; counter
+
+CV_LOOP:
+                LDA     1,X             ; A = hi_lsb (bits 23:16)
+                LDB     ,Y              ; B = lo_msb (bits 15:8)
+                STD     ,U++            ; Q8 = bits [23:8]
+                LEAX    2,X             ; advance hi cursor
+                LEAY    2,Y             ; advance lo cursor
+                DEC     ,S
+                BNE     CV_LOOP
+                LEAS    1,S
+CV_DONE:
+                RTS
+
+* ============================================================
+* INITW_ONE — Random Q8 init, converted to Q16 (one weight group)
+* ============================================================
+* Caller sets: UP_WHI, UP_WLO, UP_CNT. UP_PTR unused.
+*
+* For each element:
+*   JSR RAND        → D = [0, 32767]
+*   ANDD #$00FF     → D = [0, 255]
+*   SUBD #128       → D = [-128, 127] (Q8 signed 16-bit)
+*   TFR D,W         → save Q8 for lo construction + sign test
+*   Sign extension → hi = 0 or -1 based on A (sign byte)
+*   lo = Q8 * 256  → TFR B,A / CLRB constructs [byte, 0]
+*
+* Matches ATTN/11 INITW/IN.FIL (UPDAT.MAC:58-68).
+*
+* Clobbers: X, Y, D, W, CC, RN_SED (via RAND). Counter: stack byte.
+* ============================================================
+INITW_ONE:
+                LDD     UP_CNT
+                LBEQ    IW_DONE
+
+                LDX     UP_WHI
+                LDY     UP_WLO
+
+                LDA     UP_CNT+1
+                PSHS    A
+
+IW_LOOP:
+                JSR     RAND            ; D = random 15-bit
+                ANDD    #$00FF          ; D = [0, 255]
+                SUBD    #128            ; D = Q8 signed [-128, 127]
+                TFR     D,W             ; W = Q8 (preserve for lo step)
+
+* hi = sign extension of Q8 (0 for non-negative, $FFFF for negative)
+                TSTA                    ; test sign byte
+                BMI     IW_NEG
+                CLRA
+                CLRB                    ; D = 0 (positive hi)
+                BRA     IW_HI_ST
+IW_NEG:
+                LDD     #$FFFF          ; D = -1 (negative hi)
+IW_HI_ST:
+                STD     ,X++            ; store hi, advance
+
+* lo = Q8 << 8 = (value_byte, 0). Recover Q8 from W.
+                TFR     W,D             ; D = original Q8
+                TFR     B,A             ; A = value byte (was B)
+                CLRB                    ; D = [byte, 0] = Q8 * 256
+                STD     ,Y++            ; store lo, advance
+
+                DEC     ,S
+                BNE     IW_LOOP
+                LEAS    1,S
+IW_DONE:
+                RTS
+
+* ============================================================
+* ZEROG — Zero all long-lived gradient buffers (6 VCLR calls)
+* ============================================================
+* Zeros: dWout, dWq, dWk, dWv, d_tok_emb, d_pos_emb. Each buffer
+* pointer comes from the corresponding BKWRD parameter field.
+* Does NOT zero dY/dQ/dK/dV/dX/dA — those are written fresh each
+* BKWRD (VTMUL clears, VCPY initializes dX, Step 2 VCLRs dV).
+*
+* Word counts: DIM*VOC, DIM*DIM (x3), VOC*DIM, SEQ*DIM.
+*
+* Reuses V_LEN across same-size calls (Wk, Wv share Wq's count).
+*
+* Clobbers: X, D, W, CC, V_DST, V_LEN.
+* ============================================================
+ZEROG:
+* dWout (DIM * VOC)
+                LDD     BK_DWOUT
+                STD     V_DST
+                LDD     BK_DIM
+                MULD    BK_VOC
+                TFR     W,D
+                STD     V_LEN
+                JSR     VCLR
+
+* dWq (DIM * DIM)
+                LDD     BK_DWQ
+                STD     V_DST
+                LDD     BK_DIM
+                MULD    BK_DIM
+                TFR     W,D
+                STD     V_LEN
+                JSR     VCLR
+
+* dWk (same size as dWq)
+                LDD     BK_DWK
+                STD     V_DST
+                JSR     VCLR
+
+* dWv (same size)
+                LDD     BK_DWV
+                STD     V_DST
+                JSR     VCLR
+
+* d_tok_emb (VOC * DIM)
+                LDD     BK_DTKE
+                STD     V_DST
+                LDD     BK_VOC
+                MULD    BK_DIM
+                TFR     W,D
+                STD     V_LEN
+                JSR     VCLR
+
+* d_pos_emb (SEQ * DIM)
+                LDD     BK_DPSE
+                STD     V_DST
+                LDD     BK_SEQ
+                MULD    BK_DIM
+                TFR     W,D
+                STD     V_LEN
+                JSR     VCLR
+
+                RTS
+
+* ============================================================
+* RAND — 15-bit LCG pseudo-random number generator
+* ============================================================
+* seed = ((seed * RN_MUL) + RN_ADD) & RN_MASK    ; RN_MASK = $7FFF
+* Returns D = new seed in [0, 32767]. State: RN_SED.
+* Matches ATTN/11 UPDAT.MAC:10-18.
+*
+* MULD reads multiplicand from memory; the FDB constant lives
+* adjacent to the RTS but isn't executed.
+*
+* Clobbers: D, W, CC, RN_SED.
+* ============================================================
+RAND:
+                LDD     RN_SED
+                MULD    RN_MUL_K        ; Q = seed * RN_MUL. D = HIGH 16, W = LOW 16.
+                TFR     W,D             ; D = low 16 (the part we want mod 2^16)
+                ADDD    #RN_ADD         ; D += 13849
+                ANDA    #$7F            ; clear bit 15 (mask to $7FFF)
+                STD     RN_SED
+                RTS
+RN_MUL_K:       FDB     RN_MUL          ; constant for MULD (non-executed data)
+
+* ============================================================
 * LOGTBL — 257-entry Q12 cross-entropy lookup table
 * ============================================================
                 INCLUDE tables/logtbl.asm
