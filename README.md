@@ -3,7 +3,7 @@
 A complete transformer neural network (single-head attention, forward pass + training)
 ported from PDP-11 assembly to Hitachi HD6309 assembly, running on the CoCo3 under MAME.
 
-**172 tests passing | 0 failing**
+**183 tests passing | 0 failing**
 
 ## What this is
 
