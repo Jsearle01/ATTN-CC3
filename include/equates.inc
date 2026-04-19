@@ -79,9 +79,9 @@ BW_DK           EQU     BW_DQ+DSEQ*Q15SZ
 BW_DV           EQU     BW_DK+DSEQ*Q15SZ
 BW_DX           EQU     BW_DV+DSEQ*Q15SZ      ; SEQ*D*2 = 256
 BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 158B total scratch (was 116)
-BW_END          EQU     BW_SCRATCH+232        ; was +192 (BKWRD Step 1 added 40 B)
-*               Total: 1800 B used of 2048 B budget, 248 B BWD_WORK headroom
-*               STACK_TOP gap: 728 bytes (was 800)
+BW_END          EQU     BW_SCRATCH+292        ; was +232 (BKWRD Steps 2-3 added 60 B)
+*               Total: 1860 B used of 2048 B budget, 188 B BWD_WORK headroom
+*               STACK_TOP gap: 668 bytes (was 728)
 
 * -------- Fixed scratch locations inside BW_SCRATCH --------
 MULSCR          EQU     BW_SCRATCH              ; 4B STQ target for normalize-by-offset
@@ -272,9 +272,32 @@ BK_RSZ          EQU     BW_SCRATCH+222          ; 2B row stride = DIM*2
 BK_VST          EQU     BW_SCRATCH+224          ; 2B vocab stride = VOC*2
 BK_SST          EQU     BW_SCRATCH+226          ; 2B seq stride = SEQ*2
 BK_YI           EQU     BW_SCRATCH+228          ; 2B Y row cursor (Step 1)
-BK_DYI          EQU     BW_SCRATCH+230          ; 2B dY row cursor (Step 1)
-*               Steps 2-6 fields start at BW_SCRATCH+232 (future)
-*               BW_SCRATCH total: 232 B. STACK_TOP gap: 728 B.
+BK_DYI          EQU     BW_SCRATCH+230          ; 2B dY row cursor (Steps 1-2)
+
+* -------- BKWRD Steps 2-3 scratch (workspace ptrs + cursors) --------
+* BK_QP/KP/VP/AP partition BK_WRK (caller-supplied forward ATTN workspace)
+* into Q/K/V each SEQ*DIM*2 bytes, then S/A at SEQ*SEQ*2. Computed once
+* at BKWRD entry, same layout as forward ATTN (see AT_QQ/KK/VV/SS).
+BK_QP           EQU     BW_SCRATCH+232          ; 2B Q workspace base (= BK_WRK+0)
+BK_KP           EQU     BW_SCRATCH+234          ; 2B K workspace base
+BK_VP           EQU     BW_SCRATCH+236          ; 2B V workspace base (Step 2)
+BK_AP           EQU     BW_SCRATCH+238          ; 2B A workspace base (Steps 2-3)
+* Step 2 cursors. BK_VJ / BK_DVJ reset per-outer, advance per-inner by RSZ.
+* BK_AI / BK_DAI walk through rows of A and dA (advance by 2 per inner;
+* after SEQ inners they naturally land at the start of the next row).
+BK_VJ           EQU     BW_SCRATCH+240          ; 2B V[j] inner cursor (Step 2)
+BK_DVJ          EQU     BW_SCRATCH+242          ; 2B dV[j] inner cursor (Step 2)
+BK_AI           EQU     BW_SCRATCH+244          ; 2B A row cursor (Steps 2-3)
+BK_DAI          EQU     BW_SCRATCH+246          ; 2B dA row cursor (Steps 2-3)
+* Step 3 scalar temp: dot(A[i], dA[i]) reused across the SEQ inner j's.
+BK_DAD          EQU     BW_SCRATCH+248          ; 2B dot_ad temp (Step 3)
+
+* -------- BKWRD Step 4 column-extract temp (forward-allocated) --------
+* DTMP holds one column of dSc (SEQ words) during dK computation.
+* Forward-allocated to keep Steps 2-3 and Step 4 in one equates edit.
+BK_DTMP         EQU     BW_SCRATCH+250          ; 32B column extract temp (Step 4)
+*               +282..+291 reserved for Steps 5-6 cursors (BK_OFF, etc.)
+*               BW_SCRATCH total: 292 B. STACK_TOP gap: 668 B.
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)
