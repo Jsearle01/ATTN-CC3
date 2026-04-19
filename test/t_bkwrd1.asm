@@ -202,7 +202,8 @@ SB1_ZERO:
 
 * Call BKWRD
                 PSHS    X               ; save (X is garbage now, but need to preserve stack)
-                JSR     BKWRD
+                JSR     BKWRD_INIT
+                JSR     BKWRD_S1
                 PULS    X
 
 * Restore: X -> EXP_DWOUT from earlier save
@@ -291,7 +292,8 @@ TEST_0:
                 LDW     DWOUT_CNT_0
                 JSR     ZERO_BUF
 * Call BKWRD
-                JSR     BKWRD
+                JSR     BKWRD_INIT
+                JSR     BKWRD_S1
 * Verify dWout
                 LDX     #DWOUT_BUF
                 LDY     #EXP_DWOUT_0
@@ -337,7 +339,8 @@ TEST_1:
                 LDX     #DWOUT_BUF
                 LDW     DWOUT_CNT_1
                 JSR     ZERO_BUF
-                JSR     BKWRD
+                JSR     BKWRD_INIT
+                JSR     BKWRD_S1
                 LDX     #DWOUT_BUF
                 LDY     #EXP_DWOUT_1
                 LDW     DWOUT_CNT_1
@@ -381,7 +384,8 @@ TEST_2:
                 LDX     #DWOUT_BUF
                 LDW     DWOUT_CNT_2
                 JSR     ZERO_BUF
-                JSR     BKWRD
+                JSR     BKWRD_INIT
+                JSR     BKWRD_S1
                 LDX     #DWOUT_BUF
                 LDY     #EXP_DWOUT_2
                 LDW     DWOUT_CNT_2
@@ -425,7 +429,8 @@ TEST_3:
                 LDX     #DWOUT_BUF
                 LDW     DWOUT_CNT_3
                 JSR     ZERO_BUF
-                JSR     BKWRD
+                JSR     BKWRD_INIT
+                JSR     BKWRD_S1
                 LDX     #DWOUT_BUF
                 LDY     #EXP_DWOUT_3
                 LDW     DWOUT_CNT_3

@@ -79,9 +79,9 @@ BW_DK           EQU     BW_DQ+DSEQ*Q15SZ
 BW_DV           EQU     BW_DK+DSEQ*Q15SZ
 BW_DX           EQU     BW_DV+DSEQ*Q15SZ      ; SEQ*D*2 = 256
 BW_SCRATCH      EQU     BW_DX+DSEQ*Q15SZ      ; 158B total scratch (was 116)
-BW_END          EQU     BW_SCRATCH+292        ; was +232 (BKWRD Steps 2-3 added 60 B)
-*               Total: 1860 B used of 2048 B budget, 188 B BWD_WORK headroom
-*               STACK_TOP gap: 668 bytes (was 728)
+BW_END          EQU     BW_SCRATCH+296        ; was +292 (BKWRD Steps 4-6 added 4 B)
+*               Total: 1864 B used of 2048 B budget, 184 B BWD_WORK headroom
+*               STACK_TOP gap: 664 bytes (was 668)
 
 * -------- Fixed scratch locations inside BW_SCRATCH --------
 MULSCR          EQU     BW_SCRATCH              ; 4B STQ target for normalize-by-offset
@@ -296,8 +296,19 @@ BK_DAD          EQU     BW_SCRATCH+248          ; 2B dot_ad temp (Step 3)
 * DTMP holds one column of dSc (SEQ words) during dK computation.
 * Forward-allocated to keep Steps 2-3 and Step 4 in one equates edit.
 BK_DTMP         EQU     BW_SCRATCH+250          ; 32B column extract temp (Step 4)
-*               +282..+291 reserved for Steps 5-6 cursors (BK_OFF, etc.)
-*               BW_SCRATCH total: 292 B. STACK_TOP gap: 668 B.
+
+* -------- BKWRD Steps 4-6 parameter/scratch fields --------
+* Caller-provided input/output pointers (matching BK_DWOUT/BK_DY convention).
+* Intermediates (dQ/dK/dV/dX) live at fixed addresses BW_DQ/BW_DK/BW_DV/BW_DX —
+* referenced directly as immediates in source.
+BK_TOKS         EQU     BW_SCRATCH+282          ; 2B input tokens ptr [SEQ] (Step 6)
+BK_DWQ          EQU     BW_SCRATCH+284          ; 2B dWq output accumulator (Step 5)
+BK_DWK          EQU     BW_SCRATCH+286          ; 2B dWk output accumulator (Step 5)
+BK_DWV          EQU     BW_SCRATCH+288          ; 2B dWv output accumulator (Step 5)
+BK_DTKE         EQU     BW_SCRATCH+290          ; 2B d_tok_emb output (Step 6)
+BK_DPSE         EQU     BW_SCRATCH+292          ; 2B d_pos_emb output (Step 6)
+BK_OFF          EQU     BW_SCRATCH+294          ; 2B position offset temp / d_pos cursor
+*               BW_SCRATCH total: 296 B. STACK_TOP gap: 664 B.
 
 * -------- Lookup tables (labels defined in tables.asm via INCLUDE) --------
 *               EXTERN  EXPTBL                  ; 256 B, Q8 exp(-i/32)

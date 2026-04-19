@@ -156,6 +156,9 @@ BKWRD:
                 JSR     BKWRD_S1        ; Step 1: dLogits -> dWout, dY
                 JSR     BKWRD_S2        ; Step 2: dA, dV
                 JSR     BKWRD_S3        ; Step 3: dSc in-place over dA
+                JSR     BKWRD_S4        ; Step 4: dQ, dK
+                JSR     BKWRD_S5        ; Step 5: dX, dWq, dWk, dWv
+                JSR     BKWRD_S6        ; Step 6: d_tok_emb, d_pos_emb
                 RTS
 
 * ============================================================
@@ -518,8 +521,335 @@ BK3_NOSHF:
                 RTS
 
 * ============================================================
-* Steps 4-6: (future)
+* BKWRD_S4 — Step 4: Backward Q.K^T -> dQ, dK
 * ============================================================
+* Part A: for each i, dQ[i] = VTMUL(K, dSc[i], SEQ, DIM)
+*   dSc row stride = BK_SST (SEQ*2). dQ row stride = BK_RSZ (DIM*2).
+*   VTMUL clears output on entry, so dQ is fully written — no pre-zero.
+*
+* Part B: for each j, extract column j of dSc into BK_DTMP, then
+*   dK[j] = VTMUL(Q, BK_DTMP, SEQ, DIM)
+*   Column stride in row-major dSc: BK_SST between consecutive rows
+*   (column-j elements are BK_SST bytes apart). Extraction helper
+*   BK4_COL is a small local sub called via BSR.
+*
+* MP_ROW and MP_COL are set ONCE (Part A) and carry through Part B
+* unchanged — both VTMULs use SEQ rows × DIM cols.
+*
+* Entry: BKWRD_INIT and S1-S3 have run. BW_DATT holds dSc (from S3).
+* ============================================================
+BKWRD_S4:
+* --- Part A: dQ[i] = VTMUL(K, dSc[i]) for i=0..SEQ-1 ---
+                LDD     BK_KP
+                STD     MP_MAT          ; K matrix (constant across Part A)
+                LDD     BK_SEQ
+                STD     MP_ROW          ; SEQ rows (constant Parts A+B)
+                LDD     BK_DIM
+                STD     MP_COL          ; DIM cols (constant Parts A+B)
+
+                LDX     #BW_DATT        ; X = dSc row cursor
+                LDU     #BW_DQ          ; U = dQ row cursor
+                LDA     BK_SEQ+1
+                PSHS    A               ; outer counter; stack: [oc]
+
+BK4A_LOOP:
+                STX     MP_VIN          ; dSc[i]
+                STU     MP_OUT          ; dQ[i]
+                PSHS    X,U             ; preserve cursors across VTMUL
+                JSR     VTMUL
+                PULS    X,U
+
+                LDD     BK_SST
+                LEAX    D,X             ; dSc cursor += SEQ*2
+                LDD     BK_RSZ
+                LEAU    D,U             ; dQ   cursor += DIM*2
+
+                DEC     ,S
+                LBNE    BK4A_LOOP
+                LEAS    1,S
+
+* --- Part B: dK[j] = VTMUL(Q, col_j(dSc)) for j=0..SEQ-1 ---
+                LDD     BK_QP
+                STD     MP_MAT          ; Q matrix (constant in Part B)
+                LDD     #BK_DTMP
+                STD     MP_VIN          ; always BK_DTMP (constant in Part B)
+*                                       ; MP_ROW/MP_COL unchanged from Part A
+
+                LDX     #BW_DATT        ; X = column-j start (j=0 -> &dSc[0][0])
+                LDU     #BW_DK          ; U = dK row cursor
+                LDA     BK_SEQ+1
+                PSHS    A               ; outer counter; stack: [oc]
+
+BK4B_LOOP:
+                PSHS    X               ; save column-j start; stack: [X(2) oc(1)]
+                BSR     BK4_COL         ; extract col j -> BK_DTMP (clobbers X,Y,B)
+                STU     MP_OUT          ; dK[j]
+                PSHS    U               ; save dK cursor; stack: [U(2) X(2) oc(1)]
+                JSR     VTMUL
+                PULS    U               ; stack: [X(2) oc(1)]
+
+                LDD     BK_RSZ
+                LEAU    D,U             ; dK cursor += DIM*2
+                PULS    X               ; restore column-j start; stack: [oc(1)]
+                LEAX    2,X             ; next column (j+1) starts 2 bytes later
+
+                DEC     ,S
+                LBNE    BK4B_LOOP
+                LEAS    1,S
+                RTS
+
+* --- BK4_COL: extract column from dSc into BK_DTMP (leaf sub) ---
+* Entry: X = &dSc[0][j] (column-j start).
+* Exit:  BK_DTMP holds SEQ words = column j. X advanced past last row.
+* Clobbers: X, Y, B, D, CC. Stack balanced.
+BK4_COL:
+                LDY     #BK_DTMP
+                LDB     BK_SEQ+1
+                PSHS    B               ; inner counter
+BK4_COL_LOOP:
+                LDD     ,X              ; dSc[row][j]
+                STD     ,Y++            ; append to BK_DTMP, advance Y
+                LDD     BK_SST
+                LEAX    D,X             ; advance to next row (stride = SEQ*2)
+                DEC     ,S
+                BNE     BK4_COL_LOOP
+                LEAS    1,S
+                RTS
+
+* ============================================================
+* BKWRD_S5 — Step 5: Backward projections -> dX, dWq, dWk, dWv
+* ============================================================
+* dX = VCPY(dY)                      ; residual init
+*
+* For each position i (BK_OFF = i * BK_RSZ advances per outer):
+*   dX[i] += MVADD(Wq, dQ[i])        ; vout += mat * vin
+*   dWq   += OUTER(X[i], dQ[i])      ; mat += vx(outer)vy
+*   dX[i] += MVADD(Wk, dK[i])
+*   dWk   += OUTER(X[i], dK[i])
+*   dX[i] += MVADD(Wv, dV[i])
+*   dWv   += OUTER(X[i], dV[i])
+*
+* MP_ROW=MP_COL=DIM for all 6 calls (square weight matrices) — set
+* once outside the loop. Only MP_MAT/MP_VIN/MP_OUT change per call.
+*
+* All pointer addresses derived as base + BK_OFF where base is either
+* a caller-provided pointer (BK_XX, BK_DWQ, BK_DWK, BK_DWV) or a
+* fixed workspace address (#BW_DQ, #BW_DK, #BW_DV, #BW_DX).
+*
+* dWq/dWk/dWv are caller-zeroed (ZEROG contract, same as dWout).
+*
+* Entry: BW_DQ/DK/DV filled by S2+S4. BK_DY holds dY from S1.
+* ============================================================
+BKWRD_S5:
+* --- dX = VCPY(dY) — residual pathway init ---
+                LDD     BK_DY
+                STD     V_SRC
+                LDD     #BW_DX
+                STD     V_DST
+                LDD     BK_SEQ
+                MULD    BK_DIM          ; W = SEQ*DIM (word count)
+                TFR     W,D
+                STD     V_LEN
+                JSR     VCPY
+
+* --- Constants for all 6 primitive calls ---
+                LDD     BK_DIM
+                STD     MP_ROW          ; DIM rows
+                STD     MP_COL          ; DIM cols
+
+* --- Init BK_OFF = 0 (position offset advances by BK_RSZ per outer) ---
+                CLRA
+                CLRB
+                STD     BK_OFF
+
+                LDA     BK_SEQ+1
+                PSHS    A               ; outer counter; stack: [oc]
+
+BK5_LOOP:
+* --- Q path: dX[i] += MVADD(Wq, dQ[i]) ---
+                LDD     BK_WQ
+                STD     MP_MAT
+                LDD     BK_OFF
+                ADDD    #BW_DQ
+                STD     MP_VIN          ; dQ[i] = BW_DQ + BK_OFF
+                LDD     BK_OFF
+                ADDD    #BW_DX
+                STD     MP_OUT          ; dX[i] = BW_DX + BK_OFF
+                JSR     MVADD
+
+* --- Q path: dWq += OUTER(X[i], dQ[i]) ---
+                LDD     BK_DWQ
+                STD     MP_MAT
+                LDD     BK_OFF
+                ADDD    BK_XX
+                STD     MP_VIN          ; X[i] = BK_XX + BK_OFF (vx)
+                LDD     BK_OFF
+                ADDD    #BW_DQ
+                STD     MP_OUT          ; dQ[i] (vy)
+                JSR     OUTER
+
+* --- K path: dX[i] += MVADD(Wk, dK[i]) ---
+                LDD     BK_WK
+                STD     MP_MAT
+                LDD     BK_OFF
+                ADDD    #BW_DK
+                STD     MP_VIN          ; dK[i]
+                LDD     BK_OFF
+                ADDD    #BW_DX
+                STD     MP_OUT          ; dX[i]
+                JSR     MVADD
+
+* --- K path: dWk += OUTER(X[i], dK[i]) ---
+                LDD     BK_DWK
+                STD     MP_MAT
+                LDD     BK_OFF
+                ADDD    BK_XX
+                STD     MP_VIN          ; X[i]
+                LDD     BK_OFF
+                ADDD    #BW_DK
+                STD     MP_OUT          ; dK[i]
+                JSR     OUTER
+
+* --- V path: dX[i] += MVADD(Wv, dV[i]) ---
+                LDD     BK_WV
+                STD     MP_MAT
+                LDD     BK_OFF
+                ADDD    #BW_DV
+                STD     MP_VIN          ; dV[i]
+                LDD     BK_OFF
+                ADDD    #BW_DX
+                STD     MP_OUT          ; dX[i]
+                JSR     MVADD
+
+* --- V path: dWv += OUTER(X[i], dV[i]) ---
+                LDD     BK_DWV
+                STD     MP_MAT
+                LDD     BK_OFF
+                ADDD    BK_XX
+                STD     MP_VIN          ; X[i]
+                LDD     BK_OFF
+                ADDD    #BW_DV
+                STD     MP_OUT          ; dV[i]
+                JSR     OUTER
+
+* --- Advance BK_OFF by BK_RSZ for next position ---
+                LDD     BK_OFF
+                ADDD    BK_RSZ
+                STD     BK_OFF
+
+                DEC     ,S
+                LBNE    BK5_LOOP
+                LEAS    1,S
+                RTS
+
+* ============================================================
+* BKWRD_S6 — Step 6: Backward embedding -> d_tok_emb, d_pos_emb
+* ============================================================
+* For each position i:
+*   tok = tokens[i]                 (read from BK_TOKS, advance by 2)
+*   d_tok[tok][d] += dX[i][d]       (scatter-add, clamp per element)
+*   d_pos[i][d]   += dX[i][d]       (direct-add,  clamp per element)
+*
+* Clamp pattern (matches VSADD stage 2 exactly): PSHS D / ADDD ,Y /
+* BVS overflow-path / on-overflow check sign of the saved addend
+* (TSTA of its high byte) to pick +32767 or -32768.
+*
+* Cursors:
+*   X   = dX[i] base ptr. Saved on stack, reloaded between the two
+*         inner loops (token scatter + pos add both traverse dX[i]).
+*         After both inners, X is at dX[i+1] (ready for next outer).
+*   U   = BK_TOKS cursor (advances by 2 per outer).
+*   BK_OFF = d_pos[i] cursor (advances by BK_RSZ per outer, stored
+*         back to BK_OFF since registers are scarce).
+*   Y   = target cursor (d_tok row for token inner, d_pos row for
+*         pos inner).
+*
+* d_tok/d_pos are caller-zeroed (same contract as dWout, dWq/dWk/dWv).
+*
+* Entry: BW_DX holds dX from S5. BK_TOKS points at input tokens.
+* ============================================================
+BKWRD_S6:
+                LDX     #BW_DX          ; dX[i] base cursor
+                LDU     BK_TOKS         ; tokens cursor
+                LDD     BK_DPSE
+                STD     BK_OFF          ; d_pos cursor (reuse BK_OFF)
+
+                LDA     BK_SEQ+1
+                PSHS    A               ; outer counter; stack: [oc]
+
+BK6_LOOP:
+                PSHS    X               ; save dX[i] base; stack: [dX_base(2) oc(1)]
+
+* --- Token scatter: Y = &d_tok[tokens[i]] ---
+                LDD     ,U++            ; D = tokens[i], advance tokens cursor
+                MULD    BK_RSZ          ; Q = token * BK_RSZ; W = low 16 = byte offset
+                TFR     W,D
+                ADDD    BK_DTKE         ; D = BK_DTKE + token*BK_RSZ
+                TFR     D,Y             ; Y = &d_tok[token]
+
+                LDB     BK_DIM+1
+                PSHS    B               ; inner counter; stack: [ic dX_base(2) oc(1)]
+BK6_TOK:
+                LDD     ,X++            ; D = dX[i][d], advance X
+                PSHS    D               ; save addend; [addend(2) ic dX_base(2) oc(1)]
+                ADDD    ,Y              ; D = dX + d_tok[Y]; V set on signed overflow
+                BVS     BK6_TOK_OV
+                STD     ,Y++            ; no overflow: store, advance Y
+                LEAS    2,S             ; drop saved addend
+                BRA     BK6_TOK_NX
+BK6_TOK_OV:
+                PULS    D               ; restore addend for sign test
+                TSTA                    ; sign of addend (dX element)
+                BMI     BK6_TOK_NG
+                LDD     #32767          ; positive overflow
+                BRA     BK6_TOK_ST
+BK6_TOK_NG:
+                LDD     #-32768         ; negative overflow
+BK6_TOK_ST:
+                STD     ,Y++
+BK6_TOK_NX:
+                DEC     ,S              ; ic
+                BNE     BK6_TOK
+                LEAS    1,S             ; drop ic; stack: [dX_base(2) oc(1)]
+
+* --- Pos direct-add: Y = &d_pos[i], reload X to dX[i] base ---
+                LDX     ,S              ; peek: X = dX[i] base
+                LDY     BK_OFF          ; Y = d_pos[i] cursor
+                LDB     BK_DIM+1
+                PSHS    B               ; inner counter; stack: [ic dX_base(2) oc(1)]
+BK6_POS:
+                LDD     ,X++
+                PSHS    D
+                ADDD    ,Y
+                BVS     BK6_POS_OV
+                STD     ,Y++
+                LEAS    2,S
+                BRA     BK6_POS_NX
+BK6_POS_OV:
+                PULS    D
+                TSTA
+                BMI     BK6_POS_NG
+                LDD     #32767
+                BRA     BK6_POS_ST
+BK6_POS_NG:
+                LDD     #-32768
+BK6_POS_ST:
+                STD     ,Y++
+BK6_POS_NX:
+                DEC     ,S
+                BNE     BK6_POS
+                LEAS    1,S             ; drop ic; stack: [dX_base(2) oc(1)]
+
+* --- End of outer: drop dX_base (X is already at dX[i+1]); advance d_pos ---
+                LEAS    2,S             ; drop dX_base; stack: [oc]
+                LDD     BK_OFF
+                ADDD    BK_RSZ
+                STD     BK_OFF          ; d_pos cursor += DIM*2
+
+                DEC     ,S
+                LBNE    BK6_LOOP
+                LEAS    1,S
+                RTS
 
 BKWRD_DONE:
                 RTS
