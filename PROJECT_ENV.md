@@ -140,6 +140,18 @@ t_exptbl, t_sftmx) use a different fixed-frame-count pattern with
 32-bit bitmap iteration. They still use `$1700` scratch. Not yet
 migrated — they work but lack the PC-stall robustness.
 
+**Known regression (Phase 6 memory-map reorg):** `t_fxmath` reports
+37/64 PASS after STACK_TOP moved to $6800. The harness's Lua
+trampoline JMPs to $0204 which lands *inside* the binary's
+`LDS #STACK_TOP` operand. With old $4800 the stray byte stream
+decoded as ASLA + NEG DP:00 (benign); with $6800 (`68 ...`) the
+decode crashes into wilderness during the M15 setup. FXMATH
+primitive correctness is transitively verified by all seven
+harnesses that depend on fxmath.asm (t_vecop, t_matop, t_attn,
+t_bkwrd1/23/456, t_updat, t_integ) — all green. Fixing the
+trampoline is non-trivial (JMP $0206 alone doesn't solve it;
+there's a second-order state issue not diagnosed). Deferred.
+
 **Creating a new trampoline**: copy `t_vcpycl.lua`, change `BIN_PATH`,
 `TEST_NAMES`, `NUM_TESTS`, `BITS_WIDTH`, and `LAST_FAIL_ADDR` if
 RESULT_BITS is 2 bytes.

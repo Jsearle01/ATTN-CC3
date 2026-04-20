@@ -1124,6 +1124,625 @@ RAND:
 RN_MUL_K:       FDB     RN_MUL          ; constant for MULD (non-executed data)
 
 * ============================================================
+* GENSM — Generate one training sample (digit reversal)
+* ============================================================
+* Fills TOKENS[0..SEQ-1] with 8 random digits (each mod 10).
+* Fills TARGET[0..SEQ-1] with reversed TOKENS.
+* Mod-10 via DIVQ of zero-extended 32-bit value.
+* ============================================================
+GENSM:
+                LDX     #TOKENS
+                LDA     #SEQ
+                PSHS    A
+GS_LP:
+                JSR     RAND            ; D = [0, 32767]
+                TFR     D,W             ; W = value (low 16 of Q)
+                LDD     #0              ; D = 0 (high 16 of Q); Q = zero-extended value
+                DIVQ    GS_TEN          ; W = quot, D = remainder (0-9)
+                STD     ,X++            ; store digit as word
+                DEC     ,S
+                BNE     GS_LP
+                LEAS    1,S
+
+* Reverse TOKENS into TARGET
+                LDX     #TOKENS+(SEQ-1)*2
+                LDY     #TARGET
+                LDA     #SEQ
+                PSHS    A
+GS_RV:
+                LDD     ,X
+                STD     ,Y++
+                LEAX    -2,X
+                DEC     ,S
+                BNE     GS_RV
+                LEAS    1,S
+                RTS
+GS_TEN:         FDB     10
+
+* ============================================================
+* CLEAR_SCREEN — fill $0400-$05FF with spaces ($20); reset cursor
+* ============================================================
+CLEAR_SCREEN:
+                LDX     #SCREEN
+                LDD     #$2020          ; two spaces
+CLS_LP:
+                STD     ,X++
+                CMPX    #SCREEN+512
+                BNE     CLS_LP
+                LDD     #SCREEN
+                STD     IO_CURS
+                RTS
+
+* ============================================================
+* PUTC — write character in B to screen at IO_CURS, advance cursor
+* ============================================================
+PUTC:
+                LDX     IO_CURS
+                STB     ,X+
+                STX     IO_CURS
+                RTS
+
+* ============================================================
+* PUTS — print null-terminated string at X
+* Clobbers: X, B, CC. Advances X past the terminator.
+* ============================================================
+PUTS:
+                LDB     ,X+
+                BEQ     PUTS_DONE
+                PSHS    X               ; preserve X across PUTC (PUTC clobbers X)
+                JSR     PUTC
+                PULS    X
+                BRA     PUTS
+PUTS_DONE:
+                RTS
+
+* ============================================================
+* NEWLINE — advance IO_CURS to next row start (32-col aligned)
+* Next-row start = (cursor | $1F) + 1
+* ============================================================
+NEWLINE:
+                LDD     IO_CURS
+                ORB     #$1F
+                ADDD    #1
+                STD     IO_CURS
+                RTS
+
+* ============================================================
+* PUTDEC — print 16-bit unsigned D as decimal (no leading zeros)
+* ============================================================
+* Push digits via DIVQ by 10, then pop and print. Always prints
+* at least one digit (handles D=0).
+* ============================================================
+PUTDEC:
+                LDX     #0              ; sentinel marker
+                PSHS    X               ; push 2-byte zero sentinel
+PD_DIV:
+                TFR     D,W
+                LDD     #0
+                DIVQ    PD_TEN          ; W = quot, D = remainder (0-9)
+                ADDB    #'0
+                PSHS    B               ; push ASCII digit
+                TFR     W,D             ; D = quotient (TFR does not set flags)
+                CMPD    #0              ; explicit flag update
+                BNE     PD_DIV
+
+* Pop and print until sentinel
+* PULS B does NOT set Z flag on 6309 — need explicit TSTB.
+PD_POP:
+                PULS    B
+                TSTB
+                BEQ     PD_FIN
+                JSR     PUTC
+                BRA     PD_POP
+PD_FIN:
+                PULS    B               ; drop second byte of sentinel
+                RTS
+PD_TEN:         FDB     10
+
+* ============================================================
+* PUTLSS — print Q12 loss value in D as "N.NNNN"
+* ============================================================
+* Integer part = D >> 12 (max ~5 for losses).
+* Fractional = (D & $0FFF) * 10000 / 4096, printed as 4 digits.
+* Result-of-MULD bit extraction: bits [27:12] of 32-bit product.
+* ============================================================
+PUTLSS:
+                PSHS    D               ; save Q12 value
+
+* --- Integer part ---
+                LSRD
+                LSRD
+                LSRD
+                LSRD
+                LSRD
+                LSRD
+                LSRD
+                LSRD
+                LSRD
+                LSRD
+                LSRD
+                LSRD                    ; 12 LSRDs => D >>= 12
+                JSR     PUTDEC
+
+                LDB     #'.
+                JSR     PUTC
+
+* --- Fractional part ---
+                PULS    D
+                ANDD    #$0FFF          ; keep low 12 bits
+                MULD    PL_10K          ; Q = frac * 10000
+                STQ     MULSCR          ; save 4 bytes
+
+* Extract bits [27:12] of the 32-bit product as a 16-bit result.
+* Layout: bits 27-24 = b0[3:0], bits 23-16 = b1, bits 15-12 = b2[7:4].
+* Algorithm: LDD MULSCR+1 gives D = b1:b2 (bits 23:8 of P).
+* LSRD*4 shifts D right by 4 → D holds ((b1>>4):((b1<<4)|(b2>>4))).
+* Then OR in b0's low nibble (shifted to A's high nibble) for bits 15-12.
+                LDA     MULSCR          ; A = b0 (bits 31-24 of product)
+                ANDA    #$0F            ; keep low nibble of b0
+                LSLA
+                LSLA
+                LSLA
+                LSLA                    ; A = (b0 & 0x0F) << 4
+                PSHS    A               ; save high-nibble contribution
+
+                LDD     MULSCR+1        ; D = b1:b2 (bits 23-8 of product)
+                LSRD
+                LSRD
+                LSRD
+                LSRD                    ; D = (b1:b2) >> 4
+
+                ORA     ,S+             ; A |= saved high-nibble contribution
+* D now = bits [27:12] of product = fractional 0..9999
+
+* Split into 4 digits via repeated DIVQ by 10, push
+                TFR     D,W
+                LDD     #0
+                DIVQ    PL_TEN          ; W = D/10, D = D%10 (ones)
+                PSHS    D
+                TFR     W,D
+                TFR     D,W
+                LDD     #0
+                DIVQ    PL_TEN          ; tens
+                PSHS    D
+                TFR     W,D
+                TFR     D,W
+                LDD     #0
+                DIVQ    PL_TEN          ; hundreds
+                PSHS    D
+                TFR     W,D
+                TFR     D,W
+                LDD     #0
+                DIVQ    PL_TEN          ; thousands (W=0 after; D = digit)
+                PSHS    D
+
+* Pop and print 4 digits (thousands, hundreds, tens, ones)
+                PULS    D               ; thousands
+                ADDB    #'0
+                JSR     PUTC
+                PULS    D
+                ADDB    #'0
+                JSR     PUTC
+                PULS    D
+                ADDB    #'0
+                JSR     PUTC
+                PULS    D
+                ADDB    #'0
+                JSR     PUTC
+                RTS
+PL_10K:         FDB     10000
+PL_TEN:         FDB     10
+
+* ============================================================
+* FORWRD — Forward pass: EMBED -> ATTN -> PROJ
+* ============================================================
+* Sets parameter blocks from production addresses and architecture
+* constants, then invokes the three composites in sequence.
+* Buffer handoff: TOKENS -> EMBED -> FC_X -> ATTN -> FC_Y -> PROJ -> FC_LOGITS.
+* ============================================================
+FORWRD:
+* --- EMBED ---
+                LDD     #TOKENS
+                STD     EM_TOK
+                LDD     #W_TKEQ8
+                STD     EM_TKE
+                LDD     #W_PSEQ8
+                STD     EM_PSE
+                LDD     #FC_X
+                STD     EM_OUT
+                LDD     #SEQ
+                STD     EM_SEQ
+                LDD     #D
+                STD     EM_DIM
+                JSR     EMBED
+
+* --- ATTN ---
+                LDD     #FC_X
+                STD     AT_XIN
+                LDD     #W_WQQ8
+                STD     AT_WQ
+                LDD     #W_WKQ8
+                STD     AT_WK
+                LDD     #W_WVQ8
+                STD     AT_WV
+                LDD     #FC_Y
+                STD     AT_YOT
+                LDD     #FC_WORK
+                STD     AT_WRK
+                LDD     #SEQ
+                STD     AT_SEQ
+                LDD     #D
+                STD     AT_DIM
+                LDD     #ARCH_SHF
+                STD     AT_SHF
+                JSR     ATTN
+
+* --- PROJ ---
+                LDD     #FC_Y
+                STD     PR_Y
+                LDD     #W_WOTQ8
+                STD     PR_WOUT
+                LDD     #FC_LOGITS
+                STD     PR_LOG
+                LDD     #SEQ
+                STD     PR_SEQ
+                LDD     #D
+                STD     PR_DIM
+                LDD     #V
+                STD     PR_VOC
+                JSR     PROJ
+                RTS
+
+* ============================================================
+* BKWRD_SETUP — configure BK_* fields from production addresses
+* ============================================================
+BKWRD_SETUP:
+                LDD     #FC_LOGITS
+                STD     BK_LOG
+                LDD     #TARGET
+                STD     BK_TGT
+                LDD     #FC_Y
+                STD     BK_YY
+                LDD     #W_WOTQ8
+                STD     BK_WOUT
+                LDD     #FC_X
+                STD     BK_XX
+                LDD     #W_WQQ8
+                STD     BK_WQ
+                LDD     #W_WKQ8
+                STD     BK_WK
+                LDD     #W_WVQ8
+                STD     BK_WV
+                LDD     #FC_WORK
+                STD     BK_WRK
+                LDD     #G_WOUT
+                STD     BK_DWOUT
+                LDD     #BW_DY
+                STD     BK_DY
+                LDD     #SEQ
+                STD     BK_SEQ
+                LDD     #D
+                STD     BK_DIM
+                LDD     #V
+                STD     BK_VOC
+                LDD     #ARCH_SHF
+                STD     BK_SHF
+                LDD     #TOKENS
+                STD     BK_TOKS
+                LDD     #G_WQ
+                STD     BK_DWQ
+                LDD     #G_WK
+                STD     BK_DWK
+                LDD     #G_WV
+                STD     BK_DWV
+                LDD     #G_TKE
+                STD     BK_DTKE
+                LDD     #G_PSE
+                STD     BK_DPSE
+                RTS
+
+* ============================================================
+* CLOSS_SETUP — configure CL_* parameter block
+* ============================================================
+CLOSS_SETUP:
+                LDD     #FC_LOGITS
+                STD     CL_LOG
+                LDD     #TARGET
+                STD     CL_TGT
+                LDD     #SEQ
+                STD     CL_SEQ
+                LDD     #V
+                STD     CL_VOC
+                RTS
+
+* ============================================================
+* Weight group descriptor table
+* 6 groups x 12 bytes/entry: hi, lo, q8, grad, count, lr_shift
+* ============================================================
+WG_TABLE:
+                FDB     W_TKEH,W_TKEL,W_TKEQ8,G_TKE,160,LR_SHF_EMB
+                FDB     W_PSEH,W_PSEL,W_PSEQ8,G_PSE,128,LR_SHF_EMB
+                FDB     W_WQH,W_WQL,W_WQQ8,G_WQ,256,LR_SHF_ATN
+                FDB     W_WKH,W_WKL,W_WKQ8,G_WK,256,LR_SHF_ATN
+                FDB     W_WVH,W_WVL,W_WVQ8,G_WV,256,LR_SHF_ATN
+                FDB     W_WOTH,W_WOTL,W_WOTQ8,G_WOUT,160,LR_SHF_OUT
+WG_END:
+WG_ESZ          EQU     12              ; bytes per entry
+
+* ============================================================
+* INITW_ALL — initialise all 6 weight groups with random Q16
+* ============================================================
+INITW_ALL:
+                LDX     #WG_TABLE
+INA_LP:
+                LDD     ,X              ; hi ptr
+                STD     UP_WHI
+                LDD     2,X             ; lo ptr
+                STD     UP_WLO
+                LDD     8,X             ; count
+                STD     UP_CNT
+                PSHS    X
+                JSR     INITW_ONE
+                PULS    X
+                LEAX    WG_ESZ,X
+                CMPX    #WG_END
+                BNE     INA_LP
+                RTS
+
+* ============================================================
+* CVT16_ALL — convert Q16 -> Q8 for all 6 weight groups
+* ============================================================
+CVT16_ALL:
+                LDX     #WG_TABLE
+CVA_LP:
+                LDD     ,X
+                STD     UP_WHI
+                LDD     2,X
+                STD     UP_WLO
+                LDD     4,X             ; q8 dest
+                STD     UP_PTR
+                LDD     8,X             ; count
+                STD     UP_CNT
+                PSHS    X
+                JSR     CVT16_ONE
+                PULS    X
+                LEAX    WG_ESZ,X
+                CMPX    #WG_END
+                BNE     CVA_LP
+                RTS
+
+* ============================================================
+* WUPDT_ALL — SGD update all 6 weight groups (per-group lr_shift)
+* ============================================================
+WUPDT_ALL:
+                LDX     #WG_TABLE
+WUA_LP:
+                LDD     ,X
+                STD     UP_WHI
+                LDD     2,X
+                STD     UP_WLO
+                LDD     6,X             ; grad ptr
+                STD     UP_PTR
+                LDD     8,X
+                STD     UP_CNT
+                LDD     10,X            ; lr_shift
+                STD     UP_SHF
+                PSHS    X
+                JSR     WUPDT_ONE
+                PULS    X
+                LEAX    WG_ESZ,X
+                CMPX    #WG_END
+                BNE     WUA_LP
+                RTS
+
+* ============================================================
+* COUNT — per-position argmax comparison, update TR_HIT / TR_TOT
+* ============================================================
+* For each i in 0..SEQ-1:
+*   VMAX(logits[i], VOC) -> X = argmax index
+*   if X == TARGET[i]: TR_HIT += 1
+*   TR_TOT += 1
+* Uses VMAX (vecop.asm): entry X=vector, B=count; exit X=index.
+* ============================================================
+COUNT:
+                LDU     #FC_LOGITS      ; logits row cursor (advances by V*2)
+                LDY     #TARGET
+                LDA     #SEQ
+                PSHS    A               ; outer counter
+CT_LP:
+                TFR     U,X             ; X = logits[i] (VMAX mutates X)
+                LDB     #V
+                JSR     VMAX            ; X = argmax index, D = max value
+                LDD     ,Y++            ; D = target[i]
+                PSHS    D
+                TFR     X,D             ; D = predicted index
+                CMPD    ,S++            ; pop target, compare
+                BNE     CT_NM
+
+* Match: TR_HIT++
+                LDD     TR_HIT
+                ADDD    #1
+                STD     TR_HIT
+CT_NM:
+* Always: TR_TOT++
+                LDD     TR_TOT
+                ADDD    #1
+                STD     TR_TOT
+
+                LEAU    2*V,U           ; next logits row
+                DEC     ,S
+                BNE     CT_LP
+                LEAS    1,S
+                RTS
+
+* ============================================================
+* REPORT — print "STEP NNN LOSS N.NNNN ACC N/N" and reset counts
+* ============================================================
+* Called when step mod RPRT == 0. Internally invokes CLOSS.
+* After printing, TR_HIT and TR_TOT are reset to 0.
+* ============================================================
+REPORT:
+                JSR     CLOSS_SETUP
+                JSR     CLOSS           ; D = Q12 loss
+                PSHS    D               ; save
+
+                LDX     #STR_STEP
+                JSR     PUTS
+                LDD     TR_STEP
+                JSR     PUTDEC
+
+                LDX     #STR_LOSS
+                JSR     PUTS
+                PULS    D
+                JSR     PUTLSS
+
+                LDX     #STR_ACC
+                JSR     PUTS
+                LDD     TR_HIT
+                JSR     PUTDEC
+                LDB     #'/
+                JSR     PUTC
+                LDD     TR_TOT
+                JSR     PUTDEC
+                JSR     NEWLINE
+
+* Reset accumulators
+                CLRA
+                CLRB
+                STD     TR_HIT
+                STD     TR_TOT
+                RTS
+
+* ============================================================
+* FINAL_TEST — run NTEST samples forward-only, print predictions
+* ============================================================
+* Format per sample: "d d d d d d d d -> p p p p p p p p OK/FAIL"
+* Final line: "ACC N/NTEST"
+* ============================================================
+FINAL_TEST:
+                CLRA
+                CLRB
+                STD     TE_SOK
+
+                LDA     #NTEST
+                PSHS    A               ; sample counter
+FT_LP:
+                JSR     GENSM
+                JSR     CVT16_ALL
+                JSR     FORWRD
+
+* Print input tokens
+                LDX     #TOKENS
+                LDB     #SEQ
+                PSHS    B
+FT_IN:
+                LDD     ,X++
+                ADDB    #'0
+                PSHS    X               ; PUTC clobbers X
+                JSR     PUTC
+                LDB     #$20
+                JSR     PUTC
+                PULS    X
+                DEC     ,S
+                BNE     FT_IN
+                LEAS    1,S
+
+* "-> "
+                LDX     #STR_ARROW
+                JSR     PUTS
+                LDB     #$20            ; space
+                JSR     PUTC
+
+* Argmax per position: print predicted digit, save to TE_PRED
+                LDU     #FC_LOGITS
+                LDX     #TE_PRED
+                LDB     #SEQ
+                PSHS    B
+FT_OUT:
+                PSHS    X               ; save TE_PRED cursor (VMAX uses X)
+                TFR     U,X             ; X = logits[i]
+                LDB     #V
+                JSR     VMAX            ; X = argmax
+                TFR     X,D             ; D = predicted index
+                PULS    X               ; restore TE_PRED cursor
+                STD     ,X++            ; save predicted digit (word)
+                ADDB    #'0
+                PSHS    X               ; PUTC clobbers X
+                JSR     PUTC
+                LDB     #$20
+                JSR     PUTC
+                PULS    X
+                LEAU    2*V,U
+                DEC     ,S
+                BNE     FT_OUT
+                LEAS    1,S
+
+* Check match: all 8 TE_PRED == TARGET?
+                LDX     #TE_PRED
+                LDY     #TARGET
+                LDA     #1              ; all-match flag
+                LDB     #SEQ
+                PSHS    D               ; [B=counter, A=flag]
+FT_CHK:
+                LDD     ,X++
+                CMPD    ,Y++
+                BEQ     FT_EQ
+                CLR     1,S             ; clear flag
+FT_EQ:
+                DEC     ,S
+                BNE     FT_CHK
+                PULS    D               ; A = flag, B = 0
+                TSTA
+                BEQ     FT_FAIL
+                LDD     TE_SOK
+                ADDD    #1
+                STD     TE_SOK
+                LDX     #STR_OK
+                BRA     FT_PRT
+FT_FAIL:
+                LDX     #STR_FAIL
+FT_PRT:
+                JSR     PUTS
+                JSR     NEWLINE
+
+                DEC     ,S
+                LBNE    FT_LP
+                LEAS    1,S
+
+* Final accuracy line: "ACC N/NTEST"
+                JSR     NEWLINE
+                LDX     #STR_ACC
+                JSR     PUTS
+                LDD     TE_SOK
+                JSR     PUTDEC
+                LDB     #'/
+                JSR     PUTC
+                LDD     #NTEST
+                JSR     PUTDEC
+                JSR     NEWLINE
+                RTS
+
+* ============================================================
+* String labels (program-level, shared by REPORT/FINAL_TEST)
+* ============================================================
+STR_HEADER:     FCC     "ATTN-CC3 TRAINING"
+                FCB     0
+STR_STEP:       FCC     "STEP "
+                FCB     0
+STR_LOSS:       FCC     " LOSS "
+                FCB     0
+STR_ACC:        FCC     " ACC "
+                FCB     0
+STR_ARROW:      FCC     "->"
+                FCB     0
+STR_OK:         FCC     " OK"
+                FCB     0
+STR_FAIL:       FCC     " FAIL"
+                FCB     0
+STR_TESTHDR:    FCC     "FINAL TEST:"
+                FCB     0
+
+* ============================================================
 * LOGTBL — 257-entry Q12 cross-entropy lookup table
 * ============================================================
                 INCLUDE tables/logtbl.asm

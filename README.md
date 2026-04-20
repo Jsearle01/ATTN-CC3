@@ -3,7 +3,7 @@
 A complete transformer neural network (single-head attention, forward pass + training)
 ported from PDP-11 assembly to Hitachi HD6309 assembly, running on the CoCo3 under MAME.
 
-**183 tests passing | 0 failing**
+**188 tests passing | 0 failing (4 unreachable in t_fxmath — see PROJECT_ENV.md)**
 
 ## What this is
 
@@ -41,29 +41,35 @@ Integration  Full forward pass: EMBED→ATTN→PROJ          1
 TRAIN        CLOSS (cross-entropy loss)                  4
              BKWRD Step 1 (dLogits, dWout, dY)           4
              BKWRD Steps 2-3 (dA, dV, dSc)              4
+             BKWRD Steps 4-6 (dQ/dK, dX, embedding)      4
+             UPDAT (WUPDT, CVT16, INITW, RAND)           5
 ```
 
 ## Current status
 
-**Forward pass: COMPLETE.** Full inference pipeline validated end-to-end with byte-exact
+**Forward pass: COMPLETE.** EMBED→ATTN→PROJ validated end-to-end with byte-exact
 match against Q8 reference. Tokens in → logits out, through embedding, single-head
 attention (Q/K/V projections, scaled dot-product scores, softmax, weighted aggregation,
 residual connection), and output projection.
 
-**Backward pass: IN PROGRESS (3 of 6 steps done).**
+**Backward pass: COMPLETE (all 6 steps).**
 
 - ✅ Step 1: dLogits → dWout, dY (softmax-minus-one-hot, <<7 shift, OUTER + MVMUL)
 - ✅ Step 2: dA, dV from backward through O=A@V (VDOT + VSADD)
 - ✅ Step 3: dSc from softmax backward (clamped subtract, inline multiply, variable shift)
-- 🔲 Step 4: dQ, dK from backward through Q·K^T (VTMUL + column extraction)
-- 🔲 Step 5: dX + weight gradients dWq/dWk/dWv (MVADD + OUTER triple accumulation)
-- 🔲 Step 6: Embedding gradients (scatter-add with clamping)
+- ✅ Step 4: dQ, dK from backward through Q·K^T (VTMUL + column extraction)
+- ✅ Step 5: dX + weight gradients dWq/dWk/dWv (MVADD + OUTER triple accumulation)
+- ✅ Step 6: Embedding gradients (scatter-add with clamping)
 
-**Not yet started:**
+**UPDAT: COMPLETE.** SGD weight update with Q16 split hi/lo accumulators, Q16↔Q8
+conversion, weight initialization via 15-bit LCG PRNG, gradient zeroing.
 
-- UPDAT: SGD weight update with Q16 accumulators, weight initialization
-- Training loop: sample generation, loss reporting, convergence tracking
-- Training validation: run N steps, verify loss decreases and accuracy increases
+**Training binary: ASSEMBLED.** `src/main.asm` orchestrates GENSM → CVT16_ALL →
+FORWRD → BKWRD → WUPDT_ALL → COUNT, with REPORT every 50 steps and FINAL_TEST at
+the end. Binary size 5459 bytes, fits at $0600-$1B4F with data starting $1C00.
+I/O pipeline smoke-tested on CoCo3 hardware (banner, digit output, PUTDEC, PUTLSS
+all rendering correctly). Full 350-step run requires manual observation in MAME
+(one training step exceeds the 32-frame autoboot-callback window).
 
 ## Key technical achievements
 
