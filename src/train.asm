@@ -1160,20 +1160,19 @@ GS_RV:
 GS_TEN:         FDB     10
 
 * ============================================================
-* CLEAR_SCREEN — fill $0400-$05FF with CoCo3 VDG "normal space"
-* ($60). Rest cursor to $0400.
+* CLEAR_SCREEN — fill $0400-$05FF with $20, reset cursor to $0400.
 * ============================================================
-* CoCo3 VDG text mode: $60 = normal space (dark background),
-* $20 = inverse space (green block). $60 fill keeps unwritten
-* cells dark. PUTC writes raw ASCII: letters $41-$5A are normal
-* uppercase in VDG; digits $30-$39 display as inverse digits.
+* Uses $20 fill (matches every existing t_* harness in the project
+* that displays visible text under MAME coco3h). Initial attempt
+* with $60 fill rendered invisibly; $20 is what the CoCo3/VDG
+* display pipeline is empirically happy with after BASIC boot.
 CLEAR_SCREEN:
+                LDA     #$20
+                STA     SCREEN          ; seed first byte
                 LDX     #SCREEN
-                LDD     #$6060          ; CoCo3 normal-space fill
-CLS_LP:
-                STD     ,X++
-                CMPX    #SCREEN+512
-                BNE     CLS_LP
+                LDU     #SCREEN+1
+                LDW     #511
+                TFM     X+,U+           ; propagate via block copy
                 LDD     #SCREEN
                 STD     IO_CURS
                 RTS
@@ -1557,7 +1556,9 @@ COUNT:
 CT_LP:
                 TFR     U,X             ; X = logits[i] (VMAX mutates X)
                 LDB     #V
+                PSHS    U,Y             ; VMAX clobbers U and Y
                 JSR     VMAX            ; X = argmax index, D = max value
+                PULS    U,Y             ; restore logits/target cursors
                 LDD     ,Y++            ; D = target[i]
                 PSHS    D
                 TFR     X,D             ; D = predicted index
@@ -1601,8 +1602,8 @@ REPORT:
                 PULS    D
                 JSR     PUTLSS
 
-                LDX     #STR_ACC
-                JSR     PUTS
+                LDB     #$20            ; single-space separator (keeps line <=32 cols)
+                JSR     PUTC
                 LDD     TR_HIT
                 JSR     PUTDEC
                 LDB     #'/
@@ -1664,12 +1665,12 @@ FT_IN:
                 LDB     #SEQ
                 PSHS    B
 FT_OUT:
-                PSHS    X               ; save TE_PRED cursor (VMAX uses X)
+                PSHS    U,X             ; VMAX clobbers U (logits cursor) and X
                 TFR     U,X             ; X = logits[i]
                 LDB     #V
                 JSR     VMAX            ; X = argmax
                 TFR     X,D             ; D = predicted index
-                PULS    X               ; restore TE_PRED cursor
+                PULS    X,U             ; restore TE_PRED and logits cursors
                 STD     ,X++            ; save predicted digit (word)
                 ADDB    #'0
                 PSHS    X               ; PUTC clobbers X
@@ -1687,14 +1688,14 @@ FT_OUT:
                 LDY     #TARGET
                 LDA     #1              ; all-match flag
                 LDB     #SEQ
-                PSHS    D               ; [B=counter, A=flag]
+                PSHS    D               ; 6309 PSHS D: ,S=A (flag), 1,S=B (counter)
 FT_CHK:
                 LDD     ,X++
                 CMPD    ,Y++
                 BEQ     FT_EQ
-                CLR     1,S             ; clear flag
+                CLR     ,S              ; mismatch: clear flag (A at ,S)
 FT_EQ:
-                DEC     ,S
+                DEC     1,S             ; counter-- (B at 1,S)
                 BNE     FT_CHK
                 PULS    D               ; A = flag, B = 0
                 TSTA
@@ -1725,16 +1726,18 @@ FT_PRT:
                 LDD     #NTEST
                 JSR     PUTDEC
                 JSR     NEWLINE
-                RTS
+FT_HALT:
+                BRA     FT_HALT         ; training complete — freeze screen
+                RTS                     ; unreachable
 
 * ============================================================
 * String labels (program-level, shared by REPORT/FINAL_TEST)
 * ============================================================
 STR_HEADER:     FCC     "ATTN-CC3 TRAINING"
                 FCB     0
-STR_STEP:       FCC     "STEP "
+STR_STEP:       FCC     "ST"
                 FCB     0
-STR_LOSS:       FCC     " LOSS "
+STR_LOSS:       FCC     " L"
                 FCB     0
 STR_ACC:        FCC     " ACC "
                 FCB     0
