@@ -30,6 +30,13 @@ MAIN:
                 LDMD    #1              ; 6309 native mode
                 LDS     #STACK_TOP      ; stack at $6800
 
+* Clear screen and print banner FIRST so the user sees text even
+* while the ~5-frame INITW_ALL is still running.
+                JSR     CLEAR_SCREEN
+                LDX     #STR_HEADER
+                JSR     PUTS
+                JSR     NEWLINE
+
 * Initialise PRNG seed
                 LDD     #RN_INIT
                 STD     RN_SED
@@ -41,12 +48,6 @@ MAIN:
 * the BK_D* fields, so BKWRD_SETUP must run first.
                 JSR     BKWRD_SETUP
                 JSR     ZEROG
-
-* Clear screen, print banner
-                JSR     CLEAR_SCREEN
-                LDX     #STR_HEADER
-                JSR     PUTS
-                JSR     NEWLINE
 
 * Initialise training state (1-indexed step counter, matches ATTN/11)
                 LDD     #1

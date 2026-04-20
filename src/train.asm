@@ -1160,11 +1160,16 @@ GS_RV:
 GS_TEN:         FDB     10
 
 * ============================================================
-* CLEAR_SCREEN — fill $0400-$05FF with spaces ($20); reset cursor
+* CLEAR_SCREEN — fill $0400-$05FF with CoCo3 VDG "normal space"
+* ($60). Rest cursor to $0400.
 * ============================================================
+* CoCo3 VDG text mode: $60 = normal space (dark background),
+* $20 = inverse space (green block). $60 fill keeps unwritten
+* cells dark. PUTC writes raw ASCII: letters $41-$5A are normal
+* uppercase in VDG; digits $30-$39 display as inverse digits.
 CLEAR_SCREEN:
                 LDX     #SCREEN
-                LDD     #$2020          ; two spaces
+                LDD     #$6060          ; CoCo3 normal-space fill
 CLS_LP:
                 STD     ,X++
                 CMPX    #SCREEN+512
