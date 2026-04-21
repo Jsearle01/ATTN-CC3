@@ -64,12 +64,11 @@ residual connection), and output projection.
 **UPDAT: COMPLETE.** SGD weight update with Q16 split hi/lo accumulators, Q16↔Q8
 conversion, weight initialization via 15-bit LCG PRNG, gradient zeroing.
 
-**Training binary: ASSEMBLED.** `src/main.asm` orchestrates GENSM → CVT16_ALL →
-FORWRD → BKWRD → WUPDT_ALL → COUNT, with REPORT every 50 steps and FINAL_TEST at
-the end. Binary size 5459 bytes, fits at $0600-$1B4F with data starting $1C00.
-I/O pipeline smoke-tested on CoCo3 hardware (banner, digit output, PUTDEC, PUTLSS
-all rendering correctly). Full 350-step run requires manual observation in MAME
-(one training step exceeds the 32-frame autoboot-callback window).
+**Training binary: RUNS END-TO-END on CoCo3 under MAME.** `src/main.asm` orchestrates
+GENSM → CVT16_ALL → FORWRD → BKWRD → WUPDT_ALL → COUNT, with REPORT every 50 steps
+and FINAL_TEST (10 digit-reversal samples) at the end. Training loop stack is
+bit-balanced across 350 iterations (SP returns to $6800); FINAL_TEST runs cleanly
+without memory corruption once PUTC/NEWLINE scroll on screen overflow.
 
 ## Key technical achievements
 

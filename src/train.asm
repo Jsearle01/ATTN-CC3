@@ -1178,10 +1178,40 @@ CLEAR_SCREEN:
                 RTS
 
 * ============================================================
+* SCROLL — scroll screen up one row, blank last row
+* ============================================================
+* Moves rows 1..15 up into rows 0..14 (480 bytes), fills row 15
+* with spaces. Preserves D, X, U, W. Called by PUTC/NEWLINE when
+* cursor would advance past the screen.
+* ============================================================
+SCROLL:
+                PSHS    D,X,U
+                PSHSW
+                LDX     #SCREEN+32      ; src: row 1
+                LDU     #SCREEN         ; dst: row 0
+                LDW     #480            ; 15 rows x 32 bytes
+                TFM     X+,U+
+                LDA     #$20            ; seed last row
+                STA     SCREEN+480
+                LDX     #SCREEN+480
+                LDU     #SCREEN+481
+                LDW     #31
+                TFM     X+,U+
+                PULSW
+                PULS    D,X,U
+                RTS
+
+* ============================================================
 * PUTC — write character in B to screen at IO_CURS, advance cursor
+* Scroll if cursor would advance off-screen (row >= 16).
 * ============================================================
 PUTC:
                 LDX     IO_CURS
+                CMPX    #SCREEN+512
+                BLO     PC_OK
+                JSR     SCROLL
+                LDX     #SCREEN+480     ; after scroll, cursor at row 15 col 0
+PC_OK:
                 STB     ,X+
                 STX     IO_CURS
                 RTS
@@ -1208,6 +1238,11 @@ NEWLINE:
                 LDD     IO_CURS
                 ORB     #$1F
                 ADDD    #1
+                CMPD    #SCREEN+512     ; next row past end?
+                BLO     NL_OK
+                JSR     SCROLL
+                LDD     #SCREEN+480     ; start of last row (now blank)
+NL_OK:
                 STD     IO_CURS
                 RTS
 

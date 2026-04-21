@@ -70,7 +70,6 @@ TRAIN_LOOP:
                 JSR     WUPDT_ALL
                 JSR     COUNT
 
-* Report each step (RPRT=1 for smoke)
                 LDD     TR_STEP
                 TFR     D,W
                 LDD     #0
@@ -79,28 +78,19 @@ TRAIN_LOOP:
                 BNE     TR_NORPT
                 JSR     REPORT
 TR_NORPT:
-
                 LDD     TR_STEP
                 ADDD    #1
                 STD     TR_STEP
                 CMPD    #NSTEP+1
                 LBNE    TRAIN_LOOP
 
-* ============================================================
-* Training complete — halt here. FINAL_TEST disabled pending
-* stack-drift investigation (350 iters appears to accumulate a
-* small stack leak that crashes the post-loop path). The per-step
-* REPORT output is sufficient proof the transformer learned.
-* ============================================================
+* FINAL_TEST: run NTEST samples forward-only, print predictions.
+                JSR     NEWLINE
+                LDX     #STR_TESTHDR
+                JSR     PUTS
+                JSR     NEWLINE
+                JSR     FINAL_TEST
 HALT:           BRA     HALT
-
-* --- FINAL_TEST path (unreachable; restore by removing the BRA
-*     above and uncommenting below) ---
-*               JSR     NEWLINE
-*               LDX     #STR_TESTHDR
-*               JSR     PUTS
-*               JSR     NEWLINE
-*               JSR     FINAL_TEST
 
 MAIN_RPRT:      FDB     RPRT            ; constant for step mod RPRT DIVQ
 
