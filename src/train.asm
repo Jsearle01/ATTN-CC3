@@ -1637,8 +1637,8 @@ REPORT:
                 PULS    D
                 JSR     PUTLSS
 
-                LDB     #$20            ; single-space separator (keeps line <=32 cols)
-                JSR     PUTC
+                LDX     #STR_HITSEP     ; " AC " separator
+                JSR     PUTS
                 LDD     TR_HIT
                 JSR     PUTDEC
                 LDB     #'/
@@ -1681,18 +1681,14 @@ FT_IN:
                 ADDB    #'0
                 PSHS    X               ; PUTC clobbers X
                 JSR     PUTC
-                LDB     #$20
-                JSR     PUTC
                 PULS    X
                 DEC     ,S
                 BNE     FT_IN
                 LEAS    1,S
 
-* "-> "
+* "->" — no trailing space (compact per-sample line)
                 LDX     #STR_ARROW
                 JSR     PUTS
-                LDB     #$20            ; space
-                JSR     PUTC
 
 * Argmax per position: print predicted digit, save to TE_PRED
                 LDU     #FC_LOGITS
@@ -1709,8 +1705,6 @@ FT_OUT:
                 STD     ,X++            ; save predicted digit (word)
                 ADDB    #'0
                 PSHS    X               ; PUTC clobbers X
-                JSR     PUTC
-                LDB     #$20
                 JSR     PUTC
                 PULS    X
                 LEAU    2*V,U
@@ -1770,11 +1764,13 @@ FT_HALT:
 * ============================================================
 STR_HEADER:     FCC     "ATTN-CC3 TRAINING"
                 FCB     0
-STR_STEP:       FCC     "ST"
+STR_STEP:       FCC     "STEP "
                 FCB     0
-STR_LOSS:       FCC     " L"
+STR_LOSS:       FCC     " LS "
                 FCB     0
-STR_ACC:        FCC     " ACC "
+STR_HITSEP:     FCC     " AC "
+                FCB     0
+STR_ACC:        FCC     "ACC "
                 FCB     0
 STR_ARROW:      FCC     "->"
                 FCB     0
