@@ -110,18 +110,31 @@ modern host, wall-clock is **~30–60 seconds**.
 
 **Memory usage summary.**
 
-| Region                 | Range         | Size   | Contents                       |
-|------------------------|---------------|--------|--------------------------------|
-| Code + tables          | $0600–~$1BE5  | ~5.5KB | Main, primitives, composites, EXPTBL, LOGTBL |
-| Training state         | $1C00–$1C4F   |  80 B  | TR_STEP, TR_HIT, TR_TOT, TOKENS, TARGET, cursor |
-| Q16 weight accumulators| $1C50–$2D4F   | 4.8KB  | Split hi/lo for 6 weight groups |
-| Q8 weight copies       | $2D50–$36CF   | 2.4KB  | Regenerated each step by CVT16_ALL |
-| Gradient accumulators  | $36D0–$404F   | 2.4KB  | Q15, zeroed once at startup    |
-| Forward cache          | $4050–$466F   | 1.5KB  | X, ATTN workspace, Y, logits   |
-| Backward workspace     | $4670–$4BEF   | 1.4KB  | dY, dA/dSc, dQ, dK, dV, dX     |
-| Unused diagnostic gap  | $4BF0–$63FF   | 6.1KB  | Headroom                       |
-| BW_SCRATCH (DP page)   | $6400–$6533   | 308 B  | DP parameter blocks            |
-| Stack                  | $6534–$67FF   | 716 B  | Grows down from $6800          |
+| Region                 | Range         | Size    | Contents                       |
+|------------------------|---------------|---------|--------------------------------|
+| Interrupt vectors      | $0000–$01FF   |   512 B | VEC_BASE; unused (IRQ/FIRQ masked by `ORCC #$50` at entry) |
+| BASIC workspace        | $0200–$03FF   |   512 B | Conventionally reserved for the CoCo3 BASIC ROM; unused by our binary |
+| Screen RAM             | $0400–$05FF   |   512 B | SCREEN; 32 cols × 16 rows text, rendered directly by the GIME |
+| Code + tables          | $0600–$1B8F   | 5,520 B | Main, primitives, composites, EXPTBL, LOGTBL |
+| (gap)                  | $1B90–$1BFF   |   112 B | Free                           |
+| Training state         | $1C00–$1C4F   |    80 B | TR_STEP, TR_HIT, TR_TOT, TOKENS, TARGET, cursor |
+| Q16 weight accumulators| $1C50–$2D4F   | 4,864 B | Split hi/lo for 6 weight groups |
+| Q8 weight copies       | $2D50–$36CF   | 2,432 B | Regenerated each step by CVT16_ALL |
+| Gradient accumulators  | $36D0–$404F   | 2,432 B | Q15, zeroed once at startup    |
+| Forward cache          | $4050–$466F   | 1,568 B | X, ATTN workspace, Y, logits   |
+| Backward workspace     | $4670–$4BEF   | 1,408 B | dY, dA/dSc, dQ, dK, dV, dX     |
+| Unused diagnostic gap  | $4BF0–$63FF   | 6,160 B | Headroom                       |
+| BW_SCRATCH (DP page)   | $6400–$6533   |   308 B | DP parameter blocks; DP=$64 in production |
+| Stack                  | $6534–$67FF   |   716 B | Grows down from $6800          |
+
+**Why code starts at $0600.** The CoCo3 text-mode screen buffer lives at
+$0400–$05FF — writes to that region are rendered directly by the GIME chip as
+32×16 text at the active character attributes. Our binary's ORG is $0600 so
+that code sits immediately after the screen rather than on top of it. This is
+also why `PUTC` enforces a bounds check and calls `SCROLL` on screen overflow:
+writing past $05FF would step into the first bytes of code memory and silently
+corrupt instructions. See [PROJECT_ENV.md](PROJECT_ENV.md) §14 "Screen overflow
+corrupts code memory" for the full post-mortem.
 
 ## Key technical achievements
 
