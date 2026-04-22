@@ -382,3 +382,75 @@ idealized semantics and the actual implementation.
 Test ATTN_RESIDUAL_WRAP (test 2) specifically exercises
 this path with inputs that overflow. If a future change
 adds clamping, that test will fail.
+
+## CoCo3-specific I/O routines (PUTC, PUTS, PUTDEC, PUTLSS, SCROLL, NEWLINE)
+
+**ATTN/11 uses PDP-11 serial I/O** (character-at-a-time via
+the DL11 TTY device). Output is to a scrolling terminal;
+no addressable screen buffer, no scroll logic, no encoding
+mismatch between ASCII and display hardware.
+
+**Our 6309 port writes directly to the CoCo3 hardware-mapped
+text screen at `$0400-$05FF`** (16 rows × 32 cols, 512 B).
+The CoCo3 VDG renders characters `$20-$3F` as inverse
+blocks and `$40-$5F` or `$60-$7F` as normal text. There is
+no host OS, no BIOS call — the training binary is the only
+thing running after MAME boots.
+
+Our I/O layer (in `src/train.asm`):
+
+- `PUTC` — writes one character at the cursor, advances
+  cursor, scrolls if needed.
+- `PUTS` — writes a NUL-terminated string via repeated PUTC.
+- `PUTDEC` — prints a 16-bit D register as unsigned decimal
+  (1–5 digits, no leading zeros).
+- `PUTLSS` — prints a Q12 loss value as `N.NNNN` (six
+  characters, leading digit + dot + four fractional digits).
+- `NEWLINE` — advances cursor to start of next line; if
+  already on last line, triggers SCROLL.
+- `SCROLL` — shifts all screen rows up by one row, clears
+  the bottom row, keeps the cursor on the (now-last) row.
+
+None of these have ATTN/11 equivalents. PUTC/PUTS/PUTDEC
+are rough spiritual equivalents of `.PRINT`, `.PUTSTR`, and
+`.PUTDEC` in the PDP-11 side but the implementation is
+entirely CoCo3-specific.
+
+## Screen overflow handling (SCROLL in PUTC/NEWLINE)
+
+**ATTN/11 terminal output scrolls automatically** via the DL11
+backing terminal (there is no concept of "bottom of screen"
+in the transmitter — lines just keep coming).
+
+**On the CoCo3 the text screen is a fixed 16×32 grid.** Writing
+past position 511 ($05FF) steps into code memory at `$0600`
+and silently corrupts instructions.
+
+Our divergence: `PUTC` and `NEWLINE` both call `SCROLL` when
+the cursor reaches the bottom row. SCROLL copies rows
+`1..15` to rows `0..14`, fills row 15 with `$60` (normal
+space), and sets cursor to start of row 15.
+
+This is not a semantic change — ATTN/11's output format is
+preserved. It is a blast-radius containment for the
+hardware difference between CRT+serial and a 512-byte
+fixed buffer adjacent to code. Without SCROLL, FINAL_TEST
+overflows after ~6 samples and corrupts VDOT code around
+`$0900`. See PROJECT_ENV.md §14 "Screen overflow corrupts
+code memory" for the full post-mortem.
+
+## CLEAR_SCREEN fill with $60 (normal space), not $20
+
+Related to the I/O divergence above. The PDP-11 reference
+doesn't have a CLEAR_SCREEN primitive at all — the terminal
+is serial, so "clearing" is just a `.PRINT FF` (form feed)
+or a sequence of `.PUTC CR/LF`.
+
+Our `CLEAR_SCREEN` fills `$0400-$05FF` with `$60` (normal
+space in VDG encoding). Filling with `$20` renders as
+inverse blocks and makes subsequent ASCII text unreadable
+(light-on-dark with dark-on-light text).
+
+Commit `9ae1a55` fixed this. Again not a semantic
+divergence from ATTN/11 (which has no analog), but a
+hardware-specific choice worth documenting.

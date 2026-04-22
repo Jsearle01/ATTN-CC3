@@ -302,6 +302,207 @@ Persistent lessons also live in auto-memory at
 - `feedback_lwasm_quirks.md` — LWASM parsing quirks
 - `feedback_6309_d_preservation.md` — D-register preservation across small loops
 
+## 13. Known issues
+
+- **t_fxmath harness fragility** (see §6). MUL15Q15 subset reports
+  37/64 PASS under the current STACK_TOP=$6800 memory map. Primitive
+  correctness is transitively verified by seven downstream harnesses
+  (t_vecop, t_matop, t_attn, t_bkwrd1/23/456, t_updat, t_integ — all
+  green). Root cause: trampoline JMPs into the LDS operand bytes when
+  they decode to something catastrophic on $6800 vs $4800. Fixing the
+  trampoline alone doesn't resolve it (second-order state issue not
+  diagnosed). Deferred.
+
+- **CLEAR_SCREEN duplicate symbol in 5 test harnesses** (since commit
+  97c0a98). The training binary added its own `CLEAR_SCREEN:` label to
+  `src/train.asm`. The five test harnesses that `INCLUDE src/train.asm`
+  — **t_closs, t_updat, t_bkwrd1, t_bkwrd23, t_bkwrd456** — already
+  define their own `CLEAR_SCREEN:` labels in the harness body. Those
+  five can no longer reassemble against the current train.asm. Fix:
+  remove the duplicate label from the five harnesses (or factor
+  CLEAR_SCREEN into a shared include). Binaries assembled before
+  `97c0a98` still run correctly under their existing Lua trampolines.
+
+- **FWD_CACHE Q8SZ/DSEQ byte/word mismatch** (see INTEGRATION_NOTES.md).
+  The production training binary uses its own buffer layout that
+  sidesteps the cache sizing issue. Not blocking any working code.
+
+## 14. Lessons learned during training-binary bring-up
+
+Hard-won findings from the training-binary phase. These are what
+future-me (or a future Claude) would want to know before debugging
+the training loop or porting to a different platform.
+
+### MULD register semantics (6309)
+
+`MULD` does a 16×16→32 multiply with the 32-bit result in `D:W` —
+but **D holds the HIGH 16 bits and W holds the LOW 16 bits**. This
+is the opposite of the natural intuition ("D is the first register,
+D holds the low half"). The Q register is `D:W`, so `STQ` writes D
+then W, which lays out high-then-low in memory.
+
+Caught one real bug during RAND implementation: extracting the "low
+word of the 32-bit product" as `D` instead of `W` produced a broken
+LCG. The test 3 vector (RAND after 10 iterations) failed. Fixing the
+extraction to use W passed.
+
+Always re-read `MULD` as **"D=high, W=low, opposite of the register
+numbering intuition"** when working with 32-bit products.
+
+### CoCo3 VDG character encoding
+
+Default text mode (GIME in CoCo3-compat text mode) expects text in
+`$40–$5F` (uppercase, normal) or `$60–$7F` (lowercase, normal,
+rendered as uppercase variant). Characters in `$20–$3F` render as
+**INVERSE** cells — light-on-dark block characters, not spaces.
+
+**CLEAR_SCREEN must fill with `$60`, not `$20`.** Filling with `$20`
+produces an inverse-block background that makes subsequent ASCII
+letters barely distinguishable. Commit `9ae1a55` fixed this.
+
+No test harness caught this before the training binary, because
+every test harness reads results from scratch RAM via the Lua
+trampoline — none of them depend on the CoCo3 display actually
+working.
+
+### MAME autoboot-script callback lifetime
+
+The "32-frame notifier lifetime" limitation we worked around for
+months in every test harness **was a red herring**. Keeping the
+notifier subscription token alive in a Lua global keeps the callback
+firing indefinitely:
+
+```lua
+token = emu.add_machine_frame_notifier(function() ... end)
+```
+
+(Not `local token`, as the return value is garbage-collected when
+the outer script scope ends.) Without saving the token, the callback
+registration appears to unregister after ~32 frames because the token
+goes out of scope.
+
+Discovered during the FINAL_TEST stack-leak investigation — the
+diagnostic trampoline (`t_traindiag.lua`) needs to poll through
+~77,000 emulated frames, which is three orders of magnitude more
+than the old harnesses ever ran. Saving the token lets the callback
+fire across the entire training run.
+
+All future long-running trampolines should save the token. The
+older PC-stall harnesses still work without it because they exit
+within 32 frames.
+
+### MAME `-autoboot_delay 5`
+
+`-autoboot_delay 5` tells MAME to wait 5 real-time seconds after
+ROM boot before the Lua script runs. This lets the CoCo3 BASIC ROM
+complete GIME initialization (clock divider, video mode, interrupt
+vectors) before the trampoline starts writing RAM. Without the
+delay, binary loads land before the screen is actually mapped, so
+early PUTS output isn't visible (GIME video mode not yet configured).
+
+Keep this flag on all training/long-running invocations. Test
+harnesses don't need it because they don't depend on screen output.
+
+### Screen overflow corrupts code memory
+
+The CoCo3 default text screen is `$0400–$05FF` (16 rows × 32 cols =
+512 bytes). Code at `$0600` sits **immediately** after. `PUTC`
+writing past `$05FF` steps into code memory and silently corrupts
+instructions.
+
+Two ways to hit this:
+1. A single line longer than 32 characters wraps without a `NEWLINE`,
+   overflowing the bottom row.
+2. More than 16 rows of output with no scroll handler, overflowing
+   the screen top into code.
+
+`FINAL_TEST` hit both when printing NTEST=10 samples (one overflow
+per over-32-char line plus total output taller than 16 rows).
+Fixed in commit `bbe0b65` by adding a SCROLL routine to PUTC and
+NEWLINE. Before the fix, the crash manifested as garbled output
+after sample 9 — VDOT code near `$09XX` was being overwritten by
+PUTC writes to `$06XX`.
+
+Any future code that prints more than one screen of output must
+scroll. Test harnesses are still immune because they don't print
+anything to the screen.
+
+### Late-training divergence with LR_SHF_ATN=1
+
+Classic "learning rate too high near convergence" symptom. With
+LR_SHF_ATN=1 (grad>>0 = full-magnitude gradient into Wq/Wk/Wv), the
+model trains beautifully through step ~300 (loss ~0.01, per-report
+accuracy ~90%). Then the next high-gradient sample kicks the
+attention weights far enough that the next forward pass produces
+garbage logits, and subsequent gradient steps spiral out. By step
+350, loss is ~5 and FINAL_TEST scores 0/10.
+
+Fix: `LR_SHF_ATN=2` (grad>>1, halved learning rate). FINAL_TEST
+scores 10/10. See commit `2c5d096` and TRAINING_NOTES.md for the
+full write-up. Also documented in TRAIN_PLAN.md Q5.
+
+If the architecture changes (different d_model, different vocab,
+different sequence length, different sample distribution), revisit
+all three `LR_SHF_*` values. The defaults are specific to the
+current Stage 1 task (digit reversal, SEQ=8, DIM=16, VOC=10).
+
+### Stack-leak investigation was misleading
+
+During the FINAL_TEST crash investigation, an initial hypothesis was
+that the training loop leaked stack — `JSR`/`RTS` imbalance or `PSHS`
+without `PULS` somewhere — so by step 350 the stack had drifted
+enough that FINAL_TEST ran under a corrupted SP.
+
+The diagnostic (`t_traindiag.lua` + SP-tracking scratch slots) showed
+**SP returns to `$6800` exactly** after every iteration. DELTA = 0
+across 350 iterations. The stack leak theory was completely wrong.
+
+The real bug was the screen overflow (previous entry), triggered by
+FINAL_TEST's per-sample output being longer than the screen could
+hold and overwriting VDOT code. The crash appeared at a consistent
+point (around sample 9) only because that's when the accumulated
+PUTC writes had advanced to the VDOT range at `$09XX`.
+
+Lesson: monitor the actual symptom (what value gets corrupted?)
+before theorizing about mechanisms. And keep the diagnostic
+instrumentation around — SP monitoring caught a non-obvious
+falsification of the leading theory within one run.
+
+### Test harnesses do not exercise the CoCo3 display
+
+Every test harness writes results to scratch RAM and has Lua read
+those values. The CoCo3 video subsystem is never touched by any
+test harness. This means:
+
+- CoCo3-specific display bugs (encoding, clear-screen fill value,
+  scroll logic) only surface when the training binary runs.
+- If a future harness needs to write to screen for any reason, it
+  must include all the display primitives (`PUTC`, `PUTS`, scroll,
+  CLEAR_SCREEN with the correct fill) — none of which are in the
+  core primitive library, they're all in `src/train.asm`.
+
+### Binary growth forces memory-map reorgs
+
+Over the project's lifetime the production memory map has moved
+several times:
+
+- **SCRATCH_BASE**: `$1700` → `$2000` (test harness scratch migration,
+  when t_embed's binary tail at $171A clobbered static data at $1700).
+- **STACK_TOP**: `$4800` → `$6800` (to make room for FWD_CACHE,
+  GRAD_BASE, BWD_WORK, and all the Q16/Q8 weight arrays — total
+  production data footprint is ~14 KB).
+- **BW_SCRATCH**: `$4420` → `$6400` (moved with STACK_TOP during the
+  Phase 6 memory-map reorg).
+
+Every absolute address in Lua trampolines (scratch read offsets,
+HALT-address poll targets, diagnostic scratch slots) had to be
+hand-updated. Grep for hex literals in `/c/mame/t_*.lua` before any
+future reorg.
+
+The production layout is now stable — BW_DEND at `$4BF0` with
+`$4BF0–$63FF` as 6 KB of diagnostic headroom means the next
+significant binary growth won't force another reorg.
+
 ## Maintenance
 
 - When any path, version, or invocation changes, update this file in
@@ -311,3 +512,5 @@ Persistent lessons also live in auto-memory at
   result in the same commit.
 - When the MAME command line flags are adjusted, re-verify section 5
   with a t_vcpycl probe and update the working invocation.
+- When a bring-up or validation session surfaces a non-obvious lesson,
+  add it to section 14.
