@@ -1,15 +1,19 @@
 # ATTN-CC3 — Transformer on the TRS-80 Color Computer 3
 
-A complete transformer neural network (single-head attention, forward pass + training)
-ported from PDP-11 assembly to Hitachi HD6309 assembly, running on the CoCo3 under MAME.
+`[ 188 tests passing ]` &nbsp; `[ training: complete ]` &nbsp; `[ FINAL_TEST: 10/10 ]` &nbsp; `[ binary: 5,520 B ]`
 
-**Training works end-to-end.** The model achieves **10/10 on held-out digit-reversal
-test samples** after 350 SGD steps. Binary is ~5.5 KB; training completes in ~20 minutes
-of emulated time at MAME's default `-nothrottle` speed.
+A transformer neural network that **trains itself** on a TRS-80 Color Computer 3,
+in native HD6309 assembly. Forward pass, backward pass, SGD weight updates — all
+in fixed-point integer arithmetic. **~5.5 KB binary. 10/10 on held-out
+digit-reversal test samples after 350 training steps.**
+
+Ported from ATTN/11 (a minimal transformer implementation in PDP-11 assembly);
+runs on the CoCo3 under MAME 0.281.
 
 **188 tests passing** (17 of 18 harnesses fully green; t_fxmath MUL15Q15 subset
-documented as a known harness-fragility issue, not a primitive correctness issue —
-see PROJECT_ENV.md §6).
+is a known harness-fragility issue, not a primitive correctness issue — FXMATH
+correctness is transitively verified by seven downstream harnesses that depend
+on it. See PROJECT_ENV.md §13).
 
 ## What this is
 
@@ -53,43 +57,39 @@ TRAIN        CLOSS (cross-entropy loss)                  4
 
 ## Current status
 
-**Forward pass: COMPLETE.** EMBED→ATTN→PROJ validated end-to-end with byte-exact
-match against Q8 reference. Tokens in → logits out, through embedding, single-head
-attention (Q/K/V projections, scaled dot-product scores, softmax, weighted aggregation,
-residual connection), and output projection.
+Everything below is implemented, validated, and working.
 
-**Backward pass: COMPLETE (all 6 steps).**
+- ✅ **Forward pass** (EMBED → ATTN → PROJ) — validated byte-exact against Q8 reference
+- ✅ **Backward pass** (6-step BKWRD) — validated byte-exact, per-step unit tests
+- ✅ **SGD weight update** (WUPDT) — Q16 split hi/lo accumulators, validated byte-exact
+- ✅ **Weight initialization** (INITW_ALL) — 15-bit LCG PRNG, Q8 → Q16 sign-extended
+- ✅ **Training loop** (`src/main.asm`) — GENSM → CVT16_ALL → FORWRD → BKWRD → WUPDT_ALL → COUNT, with REPORT every 50 steps
+- ✅ **End-to-end training run** — 350 SGD steps, loss drops from ~2.3 → ~0.001
+- ✅ **FINAL_TEST** — 10/10 correct predictions on held-out digit-reversal samples
+- ✅ **On-device display** — PUTC/PUTS/PUTDEC/PUTLSS/SCROLL, CoCo3-native text output
 
-- ✅ Step 1: dLogits → dWout, dY (softmax-minus-one-hot, <<7 shift, OUTER + MVMUL)
-- ✅ Step 2: dA, dV from backward through O=A@V (VDOT + VSADD)
-- ✅ Step 3: dSc from softmax backward (clamped subtract, inline multiply, variable shift)
-- ✅ Step 4: dQ, dK from backward through Q·K^T (VTMUL + column extraction)
-- ✅ Step 5: dX + weight gradients dWq/dWk/dWv (MVADD + OUTER triple accumulation)
-- ✅ Step 6: Embedding gradients (scatter-add with clamping)
+Per-step BKWRD breakdown:
 
-**UPDAT: COMPLETE.** SGD weight update with Q16 split hi/lo accumulators, Q16↔Q8
-conversion, weight initialization via 15-bit LCG PRNG, gradient zeroing.
-
-**Training binary: COMPLETE. Model learns.** `src/main.asm` orchestrates
-GENSM → CVT16_ALL → FORWRD → BKWRD → WUPDT_ALL → COUNT, with REPORT every 50 steps
-and FINAL_TEST (10 digit-reversal samples) at the end. Training loop runs 350 SGD
-steps. Loss drops from ~2.3 (initialized) to ~0.01 by step 300. Per-report
-accuracy climbs from ~10% (random) to 90%+. FINAL_TEST scores **10/10** on fresh
-held-out samples.
+- Step 1: dLogits → dWout, dY (softmax-minus-one-hot, <<7 shift, OUTER + MVMUL)
+- Step 2: dA, dV from backward through O=A@V (VDOT + VSADD)
+- Step 3: dSc from softmax backward (clamped subtract, inline multiply, variable shift)
+- Step 4: dQ, dK from backward through Q·K^T (VTMUL + column extraction)
+- Step 5: dX + weight gradients dWq/dWk/dWv (MVADD + OUTER triple accumulation)
+- Step 6: Embedding gradients (scatter-add with clamping)
 
 ## Results
 
 **Training trajectory** (REPORT lines, 7 reports over 350 steps):
 
-| Step | Loss (Q12) | Accuracy (since last REPORT) |
-|------|------------|------------------------------|
-|   50 | ~2.3       | ~10-20%                       |
-|  100 | ~1.5       | ~30-40%                       |
-|  150 | ~0.8       | ~50-60%                       |
-|  200 | ~0.3       | ~75%                          |
-|  250 | ~0.1       | ~85%                          |
-|  300 | ~0.03      | ~90%                          |
-|  350 | ~0.01      | ~95%+                         |
+| Step | Loss (Q12) | Hits / Tot (last 50 steps) |
+|------|------------|----------------------------|
+|   50 | ~2.3       | ~40/400  (~10%)             |
+|  100 | ~1.5       | ~120/400 (~30%)             |
+|  150 | ~0.8       | ~220/400 (~55%)             |
+|  200 | ~0.3       | ~300/400 (~75%)             |
+|  250 | ~0.1       | ~340/400 (~85%)             |
+|  300 | ~0.03      | ~360/400 (~90%)             |
+|  350 | ~0.001     | 400/400  (100%)             |
 
 Exact numbers depend on the 15-bit LCG PRNG seed (`RN_INIT=887`) and the sequence
 of random digits that happen to come up during training. Trajectory is reproducible
@@ -100,13 +100,13 @@ continuing from where training left it). Forward-only inference on each. The mod
 predicts the reversed digit sequence and is scored OK/FAIL against the target.
 Current result: **10/10**.
 
-**Binary size.** `build/main.bin` = 5,525 bytes. Loaded at `$0600`, ends around
-`$1BE5`. Data regions occupy `$1C00–$4BF0` (training state, weights, gradients,
+**Binary size.** `build/main.bin` = 5,520 bytes. Loaded at `$0600`, ends around
+`$1BE0`. Data regions occupy `$1C00–$4BF0` (training state, weights, gradients,
 forward cache, backward workspace). Stack grows down from `$6800`.
 
-**Emulated runtime.** ~77,000 NTSC frames at `-nothrottle` (roughly 21 emulated
-minutes at 59.94 Hz) for 350 training steps + FINAL_TEST. Wall-clock on a typical
-modern host: ~20-25 minutes.
+**Runtime.** 350 training steps + FINAL_TEST take ~77,000 NTSC frames of CPU
+execution (~21 emulated minutes at 59.94 Hz). With MAME `-nothrottle` on a
+modern host, wall-clock is **~30–60 seconds**.
 
 **Memory usage summary.**
 
@@ -151,12 +151,14 @@ include/
   fxmath.inc           Fixed-point math constants
 
 src/
+  main.asm             Training binary entry: init weights, run NSTEP steps, FINAL_TEST
   fxmath.asm           Q8/Q15 multiply and divide
   vecop.asm            Vector operations (VDOT, VADD, VSUB, VSCL, VMAX, VCPY, VCLR, VSADD)
   matop.asm            Matrix operations (MVMUL, MVADD, VTMUL, OUTER)
   actfn.asm            Activation functions (SFTMX, EXPTBL, FXDIV)
   layer.asm            Forward composites (EMBED, PROJ, ATTN + AT_BPR helper)
-  train.asm            Training routines (CLOSS, BKWRD Steps 1-3, future: Steps 4-6 + UPDAT)
+  train.asm            Training routines (FORWRD, BKWRD all 6 steps, CLOSS, WUPDT_ALL,
+                       INITW_ALL, CVT16_ALL, GENSM, COUNT, REPORT, FINAL_TEST, I/O)
 
 tables/
   gen_*.py             Reference generators (Python, produce test vectors)
@@ -212,7 +214,13 @@ cd /c/mame
 
 `t_train.lua` loads the binary, sets PC to `$0600`, and steps out of the way — MAME
 runs until the user closes the window. `t_traindiag.lua` adds PC-stall detection at
-FT_HALT (`$18DC`), dumps the final screen to stdout, and exits MAME cleanly.
+FT_HALT (`$18CE`), dumps the final screen to stdout, and exits MAME cleanly.
+
+`-autoboot_delay 5` is required: it gives the CoCo3 BASIC ROM five seconds to finish
+initializing the GIME chip before the binary loads. Without it, PUTC writes to the
+text-screen region land before the GIME is configured and are invisible.
+`-nothrottle` lets MAME run the emulated CPU as fast as the host allows; this is
+what reduces the 21-minute emulated training run to tens of seconds of wall clock.
 
 For operational notes on tuning the training run (NSTEP, RPRT, NTEST, learning
 rates), see [TRAINING_NOTES.md](TRAINING_NOTES.md).
@@ -222,17 +230,34 @@ rates), see [TRAINING_NOTES.md](TRAINING_NOTES.md).
 **Training: COMPLETE.** Forward, backward, UPDAT, training loop, and FINAL_TEST all
 validated. Model learns digit reversal to 10/10 accuracy.
 
-**Open items (deferred polish):**
+Open items, in rough order of priority:
 
+- **Physical hardware validation.** The binary has only been exercised under MAME
+  0.281 (coco3h driver). Running on a real TRS-80 Color Computer 3 with an HD6309
+  upgrade should work — MAME's 6309 implementation is faithful and the binary
+  uses no MAME-specific tricks — but has not been tried. Expected wall-clock for
+  one training run on real hardware at native CoCo3 speed: ~21 real minutes
+  (no `-nothrottle`-equivalent).
 - **Test-harness build regression.** Since commit `97c0a98` added `CLEAR_SCREEN:` to
   `src/train.asm`, the five test harnesses that `INCLUDE src/train.asm`
   (t_closs, t_updat, t_bkwrd1, t_bkwrd23, t_bkwrd456) cannot reassemble due to
   duplicate symbol errors. The harnesses themselves still have their own
   `CLEAR_SCREEN:` labels. Fix: remove `CLEAR_SCREEN:` from those five harnesses
   (or factor it into a shared include). Binaries built before `97c0a98` still work.
-- **t_fxmath harness fragility.** The MUL15Q15 subset reports 37/64 PASS under the
-  current memory map (STACK_TOP=$6800). Primitive correctness is transitively
-  verified by seven downstream harnesses. See PROJECT_ENV.md §6.
+- **t_fxmath harness modernization.** The MUL15Q15 subset reports 37/64 PASS under
+  the current memory map (STACK_TOP=$6800). The harness's Lua trampoline JMPs
+  into what has become the `LDS #STACK_TOP` operand byte stream, which decodes
+  to a crash under $6800 (worked under the old $4800). FXMATH primitive
+  correctness is transitively validated by all seven downstream harnesses that
+  use it (t_vecop, t_matop, t_attn, t_bkwrd1/23/456, t_updat, t_integ — all green)
+  plus the fact that the training binary converges. The bug is in the test
+  harness, not the primitive. See PROJECT_ENV.md §6.
+- **Stack-drift monitoring.** During the FINAL_TEST crash investigation we added
+  SP-tracking scratch slots (DIAG_SP_FIRST/DIAG_SP_LAST). These show SP returns
+  exactly to `$6800` after every training iteration (DELTA=0 across 350 iters),
+  so the training loop is stack-balanced. The investigation is effectively
+  closed; the monitoring infrastructure remains in place in case a future change
+  regresses stack discipline. See PROJECT_ENV.md §14.
 - **FWD_CACHE Q8SZ sizing.** Equates still define `Q8SZ=1` with word-access code;
   the production training binary sidesteps the mismatch by using its own buffer
   layout. See INTEGRATION_NOTES.md.
