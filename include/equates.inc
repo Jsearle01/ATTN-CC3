@@ -25,7 +25,7 @@ ARCH_SHF        EQU     2               ; sqrt(D=16) = 4, log2(4) = 2
 * Matches ATTN/11 UPDAT.MAC LR.EMB/LR.ATN/LR.OUT. Effective learning
 * rate = 2^-shift in real-unit terms (see TRAIN_PLAN.md Q5).
 LR_SHF_EMB      EQU     4               ; tok_emb, pos_emb: grad >> 3
-LR_SHF_ATN      EQU     1               ; Wq, Wk, Wv:       grad >> 0
+LR_SHF_ATN      EQU     2               ; Wq, Wk, Wv:       grad >> 1 (raised from 1 to halve LR; stops step-300+ divergence)
 LR_SHF_OUT      EQU     6               ; Wout:              grad >> 5
 
 * -------- RAND PRNG constants (UPDAT.MAC 15-bit LCG) --------
